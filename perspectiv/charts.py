@@ -99,6 +99,7 @@ def projects_gantt(projects: pd.DataFrame, color_field: str = "Budget") -> go.Fi
     df["Fin affichée"] = pd.to_datetime(df["Fin"]) + pd.to_timedelta(1, unit="D")
     df["Début"] = pd.to_datetime(df["Début"])
     df["Libellé"] = df["Code"].astype(str) + " - " + df["Projet"].astype(str)
+    df["Ligne Gantt"] = range(len(df))
     if color_field not in df.columns:
         color_field = "Budget" if "Budget" in df.columns else "Statut"
     if color_field in df.columns and color_field != "Statut":
@@ -113,11 +114,19 @@ def projects_gantt(projects: pd.DataFrame, color_field: str = "Budget") -> go.Fi
         df,
         x_start="Début",
         x_end="Fin affichée",
-        y="Libellé",
+        y="Ligne Gantt",
         **color_args,
+        hover_name="Libellé",
         hover_data=["Responsable", "Priorité", "Budget", "Budget heures"],
     )
-    fig.update_yaxes(autorange="reversed", title="")
+    fig.update_yaxes(
+        range=[len(df) - 0.5, -0.5],
+        title="",
+        showticklabels=False,
+        ticks="",
+        showgrid=False,
+        zeroline=False,
+    )
     fig.update_xaxes(
         title="",
         showgrid=True,
@@ -140,8 +149,22 @@ def projects_gantt(projects: pd.DataFrame, color_field: str = "Budget") -> go.Fi
             y=1.12,
         ),
         rangeslider=dict(visible=True, thickness=0.08),
+        domain=[0.28, 1],
     )
     add_today_band(fig, df["Début"].min(), df["Fin affichée"].max())
+    for row in df.to_dict("records"):
+        fig.add_annotation(
+            xref="paper",
+            x=0.01,
+            xanchor="left",
+            yref="y",
+            y=row["Ligne Gantt"],
+            yanchor="middle",
+            text=html.escape(str(row.get("Libellé") or "")),
+            showarrow=False,
+            align="left",
+            font=dict(size=13, color="#111827"),
+        )
     fig.update_layout(
         height=max(170, min(760, GANTT_VERTICAL_CHROME_PX + len(df) * GANTT_ROW_HEIGHT_PX)),
         margin=dict(l=12, r=12, t=70, b=20),
@@ -240,6 +263,7 @@ def gantt_figure(tasks: pd.DataFrame, color_field: str = "Temps prévu") -> go.F
             xanchor="left",
             yref="y",
             y=row["Ligne Gantt"],
+            yanchor="middle",
             text=row["Libellé Gantt"],
             showarrow=False,
             align="left",

@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import json
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 from babel.numbers import format_currency
+try:
+    from PIL import Image
+except ImportError:  # pragma: no cover - Streamlit installe normalement Pillow.
+    Image = None
 from st_aggrid import AgGrid, DataReturnMode, JsCode
 from sqlalchemy.exc import IntegrityError
 
@@ -72,7 +77,21 @@ from perspectiv.services import (
 )
 
 
-st.set_page_config(page_title="PerspectiV", layout="wide")
+APP_DIR = Path(__file__).resolve().parent
+ASSET_DIR = APP_DIR / "assets"
+ICON_PATH = ASSET_DIR / "perspectiv_icon.png"
+LOGO_PATH = ASSET_DIR / "perspectiv_logo.png"
+LOGIN_PANEL_PATH = ASSET_DIR / "perspectiv_login_panel.png"
+HERO_PATH = ASSET_DIR / "perspectiv_hero.png"
+
+
+def page_icon() -> object:
+    if Image is not None and ICON_PATH.exists():
+        return Image.open(ICON_PATH)
+    return "P"
+
+
+st.set_page_config(page_title="PerspectiV", page_icon=page_icon(), layout="wide")
 init_db()
 with session_scope() as session:
     ensure_support_project(session)
@@ -120,6 +139,36 @@ TODAY_COLUMN_STRONG_COLOR = "#fed7aa"
 TODAY_COLUMN_TEXT = "#9a3412"
 TODAY_COLUMN_BORDER = "#fdba74"
 TODAY_AGGRID_CSS = {
+    ".pv-center-cell": {
+        "display": "flex !important",
+        "align-items": "center !important",
+        "justify-content": "center !important",
+        "text-align": "center !important",
+    },
+    ".pv-left-cell": {
+        "display": "flex !important",
+        "align-items": "center !important",
+        "justify-content": "flex-start !important",
+        "text-align": "left !important",
+    },
+    ".pv-center-cell .ag-cell-wrapper": {
+        "justify-content": "center !important",
+        "width": "100% !important",
+    },
+    ".pv-left-cell .ag-cell-wrapper": {
+        "justify-content": "flex-start !important",
+        "width": "100% !important",
+    },
+    ".pv-center-header .ag-header-cell-label": {
+        "justify-content": "center !important",
+        "text-align": "center !important",
+        "width": "100% !important",
+    },
+    ".pv-left-header .ag-header-cell-label": {
+        "justify-content": "flex-start !important",
+        "text-align": "left !important",
+        "width": "100% !important",
+    },
     ".today-column-header": {
         "background-color": f"{TODAY_COLUMN_COLOR} !important",
         "border-left": f"1px solid {TODAY_COLUMN_BORDER} !important",
@@ -204,6 +253,40 @@ def level_text_style(level: object) -> str:
         return ""
 
 
+LEFT_ALIGNED_TABLE_COLUMNS = {
+    "Projet",
+    "Tâche",
+    "Libellé",
+    "Titre",
+    "Prédécesseur",
+    "Successeur",
+}
+
+
+def styled_plain_table(data: pd.DataFrame):
+    left_columns = [column for column in data.columns if column in LEFT_ALIGNED_TABLE_COLUMNS]
+    styler = data.style.set_properties(
+        **{
+            "text-align": "center",
+            "vertical-align": "middle",
+        }
+    )
+    if left_columns:
+        styler = styler.set_properties(
+            subset=left_columns,
+            **{
+                "text-align": "left",
+                "vertical-align": "middle",
+            },
+        )
+    return styler.set_table_styles(
+        [
+            {"selector": "th", "props": [("text-align", "center"), ("vertical-align", "middle")]},
+            {"selector": "td", "props": [("vertical-align", "middle")]},
+        ]
+    )
+
+
 def styled_task_table(data: pd.DataFrame):
     columns = [column for column in TASK_DISPLAY_COLUMNS if column in data.columns]
     display = data[columns].copy()
@@ -231,7 +314,21 @@ def styled_task_table(data: pd.DataFrame):
         "Avancement",
     ]
     formatters = {column: "{:.1f}" for column in number_columns if column in display.columns}
-    return display.style.apply(row_style, axis=1).format(formatters, na_rep="")
+    styler = (
+        display.style.apply(row_style, axis=1)
+        .set_properties(**{"text-align": "center", "vertical-align": "middle"})
+        .set_properties(
+            subset=[column for column in ["Libellé", "Titre", "Projet", "Tâche"] if column in display.columns],
+            **{"text-align": "left", "vertical-align": "middle"},
+        )
+        .set_table_styles(
+            [
+                {"selector": "th", "props": [("text-align", "center"), ("vertical-align", "middle")]},
+                {"selector": "td", "props": [("vertical-align", "middle")]},
+            ]
+        )
+    )
+    return styler.format(formatters, na_rep="")
 
 
 def task_level_legend() -> None:
@@ -276,6 +373,22 @@ def aggrid_data(response: object, fallback: pd.DataFrame) -> pd.DataFrame:
     if isinstance(data, list):
         return pd.DataFrame(data)
     return fallback
+
+
+def compact_grid_height(
+    row_count: int,
+    row_height: int,
+    header_height: int,
+    *,
+    group_header_height: int = 0,
+    pinned_bottom_height: int = 0,
+    extra: int = 18,
+    min_height: int = 112,
+    max_height: int = 720,
+) -> int:
+    rows = max(int(row_count or 0), 1)
+    height = group_header_height + header_height + pinned_bottom_height + rows * row_height + extra
+    return max(min_height, min(max_height, height))
 
 
 def aggrid_event_data(response: object) -> dict:
@@ -415,7 +528,14 @@ def project_grid(data: pd.DataFrame, user_names: dict[str, int]):
     column_defs = [
         {"field": "ID", "hide": True, "editable": False},
         {"field": "Code", "pinned": "left", "editable": True, "width": 110},
-        {"field": "Projet", "pinned": "left", "editable": True, "width": 240},
+        {
+            "field": "Projet",
+            "pinned": "left",
+            "editable": True,
+            "width": 240,
+            "cellClass": "pv-left-cell",
+            "headerClass": "pv-left-header",
+        },
         {
             "field": "Responsable",
             "editable": True,
@@ -452,6 +572,8 @@ def project_grid(data: pd.DataFrame, user_names: dict[str, int]):
             "sortable": True,
             "resizable": True,
             "minWidth": 95,
+            "cellClass": "pv-center-cell",
+            "headerClass": "pv-center-header",
         },
         "rowSelection": "single",
         "suppressRowDeselection": True,
@@ -465,7 +587,7 @@ def project_grid(data: pd.DataFrame, user_names: dict[str, int]):
     return AgGrid(
         grid_data,
         gridOptions=grid_options,
-        height=560,
+        height=compact_grid_height(len(grid_data), row_height=42, header_height=32, min_height=136, max_height=560),
         data_return_mode=DataReturnMode.AS_INPUT,
         update_on=["cellValueChanged", "rowDoubleClicked"],
         allow_unsafe_jscode=True,
@@ -473,6 +595,7 @@ def project_grid(data: pd.DataFrame, user_names: dict[str, int]):
         show_toolbar=True,
         show_search=True,
         show_download_button=False,
+        custom_css=TODAY_AGGRID_CSS,
         key="projects_grid",
     )
 
@@ -542,9 +665,23 @@ def task_editor(
         {"field": "ID", "hide": True, "editable": False},
         {"field": "Projet ID", "hide": True, "editable": False},
         {"field": "Projet", "hide": True, "editable": False},
-        {"field": "Libellé", "headerName": "Tâche", "editable": False, "pinned": "left", "width": 290},
+        {
+            "field": "Libellé",
+            "headerName": "Tâche",
+            "editable": False,
+            "pinned": "left",
+            "width": 290,
+            "cellClass": "pv-left-cell",
+            "headerClass": "pv-left-header",
+        },
         {"field": "Référence", "editable": False, "width": 135},
-        {"field": "Titre", "editable": True, "width": 220},
+        {
+            "field": "Titre",
+            "editable": True,
+            "width": 220,
+            "cellClass": "pv-left-cell",
+            "headerClass": "pv-left-header",
+        },
         {
             "field": "Niveau",
             "editable": True,
@@ -610,6 +747,8 @@ def task_editor(
             "sortable": True,
             "resizable": True,
             "minWidth": 85,
+            "cellClass": "pv-center-cell",
+            "headerClass": "pv-center-header",
         },
         "getRowStyle": row_style,
         "rowSelection": "single",
@@ -623,7 +762,7 @@ def task_editor(
     response = AgGrid(
         grid_data,
         gridOptions=grid_options,
-        height=max(280, min(620, 105 + len(grid_data) * 32)),
+        height=compact_grid_height(len(grid_data), row_height=32, header_height=34, min_height=136, max_height=620),
         data_return_mode=DataReturnMode.AS_INPUT,
         update_on=["cellValueChanged"],
         allow_unsafe_jscode=True,
@@ -631,6 +770,7 @@ def task_editor(
         show_toolbar=True,
         show_search=True,
         show_download_button=False,
+        custom_css=TODAY_AGGRID_CSS,
         key=f"tasks_grid_{project_id}",
     )
     return aggrid_data(response, grid_data)
@@ -699,32 +839,33 @@ def weekly_timesheet_editor(
     day_cell_style = JsCode(
         f"""
         function(params) {{
+            const center = {{display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center'}};
             const todayColumns = {json.dumps(sorted(today_columns), ensure_ascii=False)};
             const weekendColumns = {json.dumps(sorted(weekend_columns), ensure_ascii=False)};
             const isToday = todayColumns.includes(params.colDef.field);
             const isWeekend = weekendColumns.includes(params.colDef.field);
             if (params.node && params.node.rowPinned === 'bottom') {{
                 if (isToday) {{
-                    return {{backgroundColor: '{TODAY_COLUMN_STRONG_COLOR}', color: '{TODAY_COLUMN_TEXT}', fontWeight: '700'}};
+                    return {{...center, backgroundColor: '{TODAY_COLUMN_STRONG_COLOR}', color: '{TODAY_COLUMN_TEXT}', fontWeight: '700'}};
                 }}
-                return {{backgroundColor: '#fef3c7', color: '#111827', fontWeight: '700'}};
+                return {{...center, backgroundColor: '#fef3c7', color: '#111827', fontWeight: '700'}};
             }}
             if (params.data && params.data._time_editable !== true) {{
                 if (isToday) {{
-                    return {{backgroundColor: '{TODAY_COLUMN_COLOR}', color: '#64748b'}};
+                    return {{...center, backgroundColor: '{TODAY_COLUMN_COLOR}', color: '#64748b'}};
                 }}
                 if (isWeekend) {{
-                    return {{backgroundColor: '#e5e7eb', color: '#64748b'}};
+                    return {{...center, backgroundColor: '#e5e7eb', color: '#64748b'}};
                 }}
-                return {{backgroundColor: '#e5e7eb', color: '#64748b'}};
+                return {{...center, backgroundColor: '#e5e7eb', color: '#64748b'}};
             }}
             if (isToday) {{
-                return {{backgroundColor: '{TODAY_COLUMN_COLOR}', color: '#111827'}};
+                return {{...center, backgroundColor: '{TODAY_COLUMN_COLOR}', color: '#111827'}};
             }}
             if (isWeekend) {{
-                return {{backgroundColor: '#eef0f3', color: '#374151'}};
+                return {{...center, backgroundColor: '#eef0f3', color: '#374151'}};
             }}
-            return {{backgroundColor: '#ffffff', color: '#111827'}};
+            return {{...center, backgroundColor: '#ffffff', color: '#111827'}};
         }}
         """
     )
@@ -783,8 +924,22 @@ def weekly_timesheet_editor(
         {"field": "Projet ID", "hide": True, "editable": False},
         {"field": "Tâche ID", "hide": True, "editable": False},
         {"field": "_time_editable", "hide": True, "editable": False},
-        {"field": "Projet", "editable": False, "pinned": "left", "width": 180},
-        {"field": "Tâche", "editable": False, "pinned": "left", "width": 360},
+        {
+            "field": "Projet",
+            "editable": False,
+            "pinned": "left",
+            "width": 180,
+            "cellClass": "pv-left-cell",
+            "headerClass": "pv-left-header",
+        },
+        {
+            "field": "Tâche",
+            "editable": False,
+            "pinned": "left",
+            "width": 360,
+            "cellClass": "pv-left-cell",
+            "headerClass": "pv-left-header",
+        },
         {"field": "Mode calcul", "editable": False, "width": 105},
     ]
     day_children = []
@@ -811,10 +966,10 @@ def weekly_timesheet_editor(
                 "width": 48,
                 "minWidth": 44,
                 "maxWidth": 54,
-                "headerClass": " ".join(header_classes),
+                "headerClass": " ".join(["pv-center-header", *header_classes]),
             }
         )
-    column_defs.append({"headerName": week_label, "headerClass": "week-group-header", "children": day_children})
+    column_defs.append({"headerName": week_label, "headerClass": "pv-center-header week-group-header", "children": day_children})
     grid_options = {
         "columnDefs": column_defs,
         "defaultColDef": {
@@ -822,6 +977,8 @@ def weekly_timesheet_editor(
             "sortable": False,
             "resizable": True,
             "minWidth": 90,
+            "cellClass": "pv-center-cell",
+            "headerClass": "pv-center-header",
         },
         "getRowStyle": row_style,
         "rowSelection": "single",
@@ -840,7 +997,15 @@ def weekly_timesheet_editor(
     response = AgGrid(
         grid_data,
         gridOptions=grid_options,
-        height=max(260, min(720, 110 + len(grid_data) * 30)),
+        height=compact_grid_height(
+            len(grid_data),
+            row_height=30,
+            header_height=32,
+            group_header_height=30,
+            pinned_bottom_height=32,
+            min_height=150,
+            max_height=720,
+        ),
         data_return_mode=DataReturnMode.AS_INPUT,
         update_on=["cellValueChanged"],
         allow_unsafe_jscode=True,
@@ -929,7 +1094,16 @@ def time_recap_grid(data: pd.DataFrame, day_specs: list[dict[str, object]], key:
     )
     column_defs = [
         {"field": "Utilisateur", "pinned": "left", "editable": False, "width": 135, "minWidth": 110, "filter": True},
-        {"field": "Tâche", "pinned": "left", "editable": False, "width": 270, "minWidth": 220, "filter": True},
+        {
+            "field": "Tâche",
+            "pinned": "left",
+            "editable": False,
+            "width": 270,
+            "minWidth": 220,
+            "filter": True,
+            "cellClass": "pv-left-cell",
+            "headerClass": "pv-left-header",
+        },
     ]
     for week_label in dict.fromkeys(str(spec["week"]) for spec in day_specs):
         week_children = []
@@ -953,16 +1127,20 @@ def time_recap_grid(data: pd.DataFrame, day_specs: list[dict[str, object]], key:
                     "width": 30,
                     "minWidth": 28,
                     "maxWidth": 36,
-                    **({"headerClass": "today-column-header"} if is_today else {}),
+                    "headerClass": "pv-center-header today-column-header" if is_today else "pv-center-header",
                     "valueFormatter": number_formatter,
                     "cellStyle": {
+                        "display": "flex",
+                        "alignItems": "center",
+                        "justifyContent": "center",
+                        "textAlign": "center",
                         "backgroundColor": background_color,
                         "color": text_color,
                         **({"fontWeight": "700"} if is_today else {}),
                     },
                 }
             )
-        column_defs.append({"headerName": week_label, "children": week_children})
+        column_defs.append({"headerName": week_label, "headerClass": "pv-center-header week-group-header", "children": week_children})
 
     grid_options = {
         "columnDefs": column_defs,
@@ -975,6 +1153,8 @@ def time_recap_grid(data: pd.DataFrame, day_specs: list[dict[str, object]], key:
             "suppressMenu": True,
             "suppressHeaderMenuButton": True,
             "menuTabs": [],
+            "cellClass": "pv-center-cell",
+            "headerClass": "pv-center-header",
         },
         "rowSelection": "single",
         "animateRows": False,
@@ -986,7 +1166,14 @@ def time_recap_grid(data: pd.DataFrame, day_specs: list[dict[str, object]], key:
     return AgGrid(
         data,
         gridOptions=grid_options,
-        height=max(260, min(720, 95 + len(data) * 30)),
+        height=compact_grid_height(
+            len(data),
+            row_height=30,
+            header_height=30,
+            group_header_height=30,
+            min_height=140,
+            max_height=720,
+        ),
         data_return_mode=DataReturnMode.AS_INPUT,
         allow_unsafe_jscode=True,
         theme="streamlit",
@@ -1051,22 +1238,70 @@ def inject_css() -> None:
     st.markdown(
         """
         <style>
-        .block-container {padding-top: 1.2rem; padding-bottom: 2rem;}
+        :root {
+            --pv-navy: #061735;
+            --pv-night: #0b2348;
+            --pv-blue: #1f6feb;
+            --pv-sky: #2bb7ff;
+            --pv-ice: #f3f8ff;
+            --pv-line: #d7e8ff;
+            --pv-sun: #ffd18a;
+        }
+        .stApp {
+            background:
+                radial-gradient(circle at 82% 8%, rgba(43, 183, 255, 0.13), transparent 28rem),
+                linear-gradient(180deg, #f7fbff 0%, #f2f6fb 58%, #ffffff 100%);
+            color: var(--pv-navy);
+        }
+        .block-container {padding-top: 2rem; padding-bottom: 1.1rem;}
+        [data-testid="stVerticalBlock"] {gap: 0.55rem;}
+        [data-testid="stHorizontalBlock"] {gap: 0.65rem;}
+        [data-testid="stAppViewContainer"] main div[data-testid="stMarkdownContainer"],
+        [data-testid="stAppViewContainer"] main div[data-testid="stHeadingWithActionElements"] {
+            overflow: visible !important;
+        }
+        [data-testid="stAppViewContainer"] main h1,
+        [data-testid="stAppViewContainer"] main h2,
+        [data-testid="stAppViewContainer"] main h3 {
+            line-height: 1.35 !important;
+            padding-top: 0.35rem !important;
+            padding-bottom: 0.05rem !important;
+            margin-top: 0 !important;
+            overflow: visible !important;
+        }
+        div[data-testid="stCaptionContainer"] {margin-top: -0.2rem;}
+        div[data-testid="stExpander"] {margin-bottom: 0.25rem;}
+        div[data-testid="stTabs"] [data-baseweb="tab-list"] {margin-bottom: 0.35rem;}
+        hr {margin: 0.55rem 0 !important;}
         [data-testid="stMetric"] {
             background: #ffffff;
-            border: 1px solid #dfe5ef;
+            border: 1px solid var(--pv-line);
             border-radius: 8px;
-            padding: 12px 14px;
+            padding: 8px 12px;
+            box-shadow: 0 8px 20px rgba(6, 23, 53, 0.04);
         }
         [data-testid="stSidebar"] {
-            background: #111827;
-            border-right: 1px solid #1f2937;
+            background: linear-gradient(180deg, #061735 0%, #0a244c 62%, #0f3266 100%);
+            border-right: 1px solid rgba(43, 183, 255, 0.24);
         }
         [data-testid="stSidebar"] * {color: #f8fafc;}
         [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {gap: 0.35rem;}
+        .pv-sidebar-brand {
+            color: #ffffff;
+            font-size: 1.45rem;
+            font-weight: 800;
+            line-height: 1.05;
+            padding-top: 0.24rem;
+        }
+        .pv-sidebar-brand span {color: var(--pv-sky);}
+        .pv-sidebar-user {
+            color: #bcd7ff;
+            font-size: 0.78rem;
+            margin-top: 0.2rem;
+        }
         [data-testid="stSidebar"] button {
-            background: #172033 !important;
-            border: 1px solid #2b3a55 !important;
+            background: rgba(255, 255, 255, 0.07) !important;
+            border: 1px solid rgba(188, 215, 255, 0.24) !important;
             color: #e5edf7 !important;
             justify-content: flex-start;
             min-height: 2.25rem;
@@ -1075,8 +1310,8 @@ def inject_css() -> None:
             box-shadow: none !important;
         }
         [data-testid="stSidebar"] button:hover {
-            background: #22304a !important;
-            border-color: #4f7df3 !important;
+            background: rgba(43, 183, 255, 0.14) !important;
+            border-color: rgba(43, 183, 255, 0.76) !important;
             color: #ffffff !important;
         }
         [data-testid="stSidebar"] button:focus-visible {
@@ -1085,25 +1320,26 @@ def inject_css() -> None:
         }
         [data-testid="stSidebar"] button[kind="primary"],
         [data-testid="stSidebar"] [data-testid="stBaseButton-primary"] {
-            background: #3567e8 !important;
-            border-color: #4f7df3 !important;
+            background: linear-gradient(90deg, #1f6feb 0%, #2bb7ff 100%) !important;
+            border-color: rgba(43, 183, 255, 0.82) !important;
             color: #ffffff !important;
+            box-shadow: 0 8px 18px rgba(31, 111, 235, 0.28) !important;
         }
         [data-testid="stSidebar"] button[kind="secondary"],
         [data-testid="stSidebar"] [data-testid="stBaseButton-secondary"] {
-            background: #172033 !important;
-            border-color: #2b3a55 !important;
+            background: rgba(255, 255, 255, 0.07) !important;
+            border-color: rgba(188, 215, 255, 0.24) !important;
             color: #e5edf7 !important;
         }
         [data-testid="stSidebar"] button[kind="secondary"]:hover,
         [data-testid="stSidebar"] [data-testid="stBaseButton-secondary"]:hover {
-            background: #22304a !important;
-            border-color: #4f7df3 !important;
+            background: rgba(43, 183, 255, 0.14) !important;
+            border-color: rgba(43, 183, 255, 0.76) !important;
             color: #ffffff !important;
         }
         [data-testid="stSidebar"] button[kind="primary"]:hover,
         [data-testid="stSidebar"] [data-testid="stBaseButton-primary"]:hover {
-            background: #2f5ed8 !important;
+            background: linear-gradient(90deg, #155bd4 0%, #18a7f2 100%) !important;
             border-color: #7aa2ff !important;
             color: #ffffff !important;
         }
@@ -1141,8 +1377,14 @@ def inject_css() -> None:
             overflow: hidden;
         }
         section[data-testid="stSidebar"][aria-expanded="false"] h1,
-        section[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stCaptionContainer"] {
+        section[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stCaptionContainer"],
+        section[data-testid="stSidebar"][aria-expanded="false"] .pv-sidebar-brand,
+        section[data-testid="stSidebar"][aria-expanded="false"] .pv-sidebar-user {
             display: none;
+        }
+        section[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stImage"] img {
+            max-width: 1.75rem !important;
+            border-radius: 0.38rem;
         }
         section[data-testid="stSidebar"][aria-expanded="false"] button {
             min-width: 1.9rem !important;
@@ -1162,6 +1404,38 @@ def inject_css() -> None:
             display: none;
         }
         h1, h2, h3 {letter-spacing: 0;}
+        [data-testid="stForm"] {
+            border-color: var(--pv-line);
+            box-shadow: 0 14px 30px rgba(6, 23, 53, 0.05);
+        }
+        .pv-login-title {
+            color: var(--pv-navy);
+            font-size: clamp(2rem, 4vw, 3.4rem);
+            font-weight: 800;
+            line-height: 1.08;
+            margin: 0 0 0.35rem 0;
+        }
+        .pv-login-title span {color: var(--pv-sky);}
+        .pv-login-subtitle {
+            color: #3f5f87;
+            font-size: 1rem;
+            margin-bottom: 1rem;
+        }
+        .pv-login-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.45rem;
+            margin-top: 0.6rem;
+        }
+        .pv-login-badges span {
+            background: rgba(31, 111, 235, 0.08);
+            border: 1px solid rgba(31, 111, 235, 0.16);
+            border-radius: 999px;
+            color: #0b3b78;
+            font-size: 0.76rem;
+            font-weight: 600;
+            padding: 0.28rem 0.62rem;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1169,12 +1443,45 @@ def inject_css() -> None:
 
 
 def login() -> None:
-    st.title("PerspectiV")
-    st.caption("Gestion de projets locale avec backend SQL et frontend Python.")
-    with st.form("login_form"):
-        username = st.text_input("Utilisateur", value="admin")
-        password = st.text_input("Mot de passe", type="password", value="admin")
-        submitted = st.form_submit_button("Se connecter", use_container_width=True)
+    hero_col, login_col = st.columns([1.35, 0.65], gap="large")
+    with hero_col:
+        if HERO_PATH.exists():
+            st.image(str(HERO_PATH), width="stretch")
+        elif LOGIN_PANEL_PATH.exists():
+            st.image(str(LOGIN_PANEL_PATH), width="stretch")
+        else:
+            st.markdown(
+                """
+                <div class="pv-login-title">Perspecti<span>V</span></div>
+                <div class="pv-login-subtitle">Voir loin. Planifier mieux. Réussir ensemble.</div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    with login_col:
+        if LOGO_PATH.exists():
+            st.image(str(LOGO_PATH), width=330)
+        else:
+            st.markdown('<div class="pv-login-title">Perspecti<span>V</span></div>', unsafe_allow_html=True)
+        st.markdown(
+            """
+            <div class="pv-login-subtitle">
+                Gestion de projets locale, budgets, Gantt, temps et planification.
+            </div>
+            <div class="pv-login-badges">
+                <span>Vision claire</span>
+                <span>Planification</span>
+                <span>Collaboration</span>
+                <span>Performance</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.subheader("Connexion")
+        with st.form("login_form"):
+            username = st.text_input("Utilisateur", value="admin")
+            password = st.text_input("Mot de passe", type="password", value="admin")
+            submitted = st.form_submit_button("Se connecter", type="primary", use_container_width=True)
     if submitted:
         with session_scope() as session:
             user = authenticate(session, username, password)
@@ -1199,8 +1506,13 @@ def sidebar() -> str:
     elif "navigation_page" not in st.session_state:
         st.session_state["navigation_page"] = PAGES[0]
 
-    st.sidebar.title("PerspectiV")
-    st.sidebar.caption(f"{user['name']} · {user['role']}")
+    logo_col, brand_col = st.sidebar.columns([0.27, 0.73], gap="small")
+    with logo_col:
+        if ICON_PATH.exists():
+            st.image(str(ICON_PATH), width=42)
+    with brand_col:
+        st.markdown('<div class="pv-sidebar-brand">Perspecti<span>V</span></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="pv-sidebar-user">{user["name"]} · {user["role"]}</div>', unsafe_allow_html=True)
     page = st.session_state["navigation_page"]
     for index, nav_page in enumerate(PAGES):
         if st.sidebar.button(
@@ -1405,7 +1717,11 @@ def show_tasks() -> None:
             st.plotly_chart(gantt_figure(edited_tasks, color_field), width="stretch")
         if not deps.empty:
             st.caption("Dépendances")
-            st.dataframe(deps[["Prédécesseur", "Successeur", "Type", "Décalage"]], width="stretch", hide_index=True)
+            st.dataframe(
+                styled_plain_table(deps[["Prédécesseur", "Successeur", "Type", "Décalage"]]),
+                width="stretch",
+                hide_index=True,
+            )
         if save_tasks:
             try:
                 with session_scope() as session:
@@ -1519,7 +1835,11 @@ def show_tasks() -> None:
         if deps.empty:
             st.info("Aucune dépendance.")
         else:
-            st.dataframe(deps[["Prédécesseur", "Successeur", "Type", "Décalage"]], width="stretch", hide_index=True)
+            st.dataframe(
+                styled_plain_table(deps[["Prédécesseur", "Successeur", "Type", "Décalage"]]),
+                width="stretch",
+                hide_index=True,
+            )
             delete_record_control("dependency", deps, ["Prédécesseur", "Successeur"], f"dependencies_{project_id}")
 
     with assign_tab:
@@ -1544,7 +1864,7 @@ def show_tasks() -> None:
         if assignments.empty:
             st.info("Aucune affectation.")
         else:
-            st.dataframe(assignments, width="stretch", hide_index=True)
+            st.dataframe(styled_plain_table(assignments), width="stretch", hide_index=True)
             delete_record_control("assignment", assignments, ["Tâche", "Utilisateur"], f"assignments_{project_id}")
 
 
@@ -1739,7 +2059,7 @@ def show_weekly_time_capture(
         total_hours = float(daily_totals.sum())
         st.caption("Total semaine : " + f"{total_hours:.2f} h")
         st.dataframe(
-            pd.DataFrame([{"Jour": day, "Heures": float(hours)} for day, hours in daily_totals.items()]),
+            styled_plain_table(pd.DataFrame([{"Jour": day, "Heures": float(hours)} for day, hours in daily_totals.items()])),
             use_container_width=True,
             hide_index=True,
         )
