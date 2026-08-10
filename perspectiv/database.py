@@ -7,7 +7,18 @@ from decimal import Decimal
 from sqlalchemy import create_engine, func, inspect, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from .models import Base, Budget, BudgetLine, Project, Task, TaskAssignment, TaskDependency, TimeEntry, User
+from .models import (
+    Base,
+    Budget,
+    BudgetLine,
+    PlannedTimeEntry,
+    Project,
+    Task,
+    TaskAssignment,
+    TaskDependency,
+    TimeEntry,
+    User,
+)
 from .security import hash_password
 from .settings import DATABASE_URL
 

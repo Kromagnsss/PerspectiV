@@ -39,8 +39,13 @@ def build_project_pdf(project_label: str, kpis: dict, tasks: pd.DataFrame, budge
     story.append(Spacer(1, 0.35 * cm))
 
     story.append(Paragraph("Tâches principales", styles["Heading2"]))
-    task_cols = ["Référence", "Titre", "Budget", "Statut", "Temps prévu", "Temps passé", "Coût réel total"]
-    story.append(_df_table(tasks[task_cols].head(20), widths=[2.4 * cm, 6 * cm, 5 * cm, 2.8 * cm, 2.2 * cm, 2.2 * cm, 2.6 * cm]))
+    task_cols = ["Référence", "Titre", "Budget", "Statut", "Temps prévu", "Temps passé", "Temps planifié", "Coût réel total"]
+    story.append(
+        _df_table(
+            tasks[task_cols].head(20),
+            widths=[2.2 * cm, 5.2 * cm, 4.4 * cm, 2.5 * cm, 2 * cm, 2 * cm, 2.2 * cm, 2.5 * cm],
+        )
+    )
     story.append(Spacer(1, 0.35 * cm))
 
     story.append(Paragraph("Budget", styles["Heading2"]))

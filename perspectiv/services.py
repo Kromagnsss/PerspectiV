@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import unicodedata
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
@@ -10,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .database import recompute_actuals
-from .models import Budget, BudgetLine, Project, Task, TaskAssignment, TaskDependency, TimeEntry, User
+from .models import Budget, BudgetLine, PlannedTimeEntry, Project, Task, TaskAssignment, TaskDependency, TimeEntry, User
 from .security import hash_password, verify_password
 
 
@@ -84,6 +86,44 @@ def _children_by_parent(tasks: list[Task]) -> dict[int, list[Task]]:
     return children_by_parent
 
 
+def _ordered_tasks(tasks: list[Task], children_by_parent: dict[int, list[Task]] | None = None) -> list[Task]:
+    children = children_by_parent or _children_by_parent(tasks)
+    for siblings in children.values():
+        siblings.sort(key=lambda item: (item.sort_order, item.reference, item.id))
+
+    task_by_id = {task.id: task for task in tasks}
+    roots = [
+        task
+        for task in tasks
+        if not task.parent_id or task.parent_id not in task_by_id or task.parent_id == task.id
+    ]
+    roots.sort(key=lambda item: (item.project_id, item.sort_order, item.reference, item.id))
+
+    ordered: list[Task] = []
+    seen: set[int] = set()
+
+    def walk(task: Task) -> None:
+        if task.id in seen:
+            return
+        seen.add(task.id)
+        ordered.append(task)
+        for child in children.get(task.id, []):
+            walk(child)
+
+    for root in roots:
+        walk(root)
+    for task in tasks:
+        walk(task)
+    return ordered
+
+
+def project_tasks(session: Session, project_id: int) -> list[Task]:
+    tasks = session.scalars(
+        select(Task).where(Task.project_id == project_id).order_by(Task.sort_order, Task.reference)
+    ).all()
+    return _ordered_tasks(tasks)
+
+
 def _aggregate_task_ids(tasks: list[Task]) -> set[int]:
     return set(_children_by_parent(tasks))
 
@@ -133,6 +173,190 @@ def ensure_direct_time_task(session: Session, task_id: int, project_id: int | No
     return task
 
 
+def _code_fragment(value: str, max_length: int = 19) -> str:
+    normalized = unicodedata.normalize("NFKD", value or "")
+    ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
+    fragment = re.sub(r"[^A-Za-z0-9]+", "", ascii_value).upper()
+    return (fragment or "UTILISATEUR")[:max_length]
+
+
+def user_project_code(user: User) -> str:
+    tokens = [token for token in re.split(r"\s+", user.full_name.strip()) if token]
+    if len(tokens) >= 2:
+        raw_code = f"{tokens[0][0]}{tokens[-1]}"
+    else:
+        raw_code = user.username or user.full_name
+    return f"USER-{_code_fragment(raw_code)}"
+
+
+def _unique_project_code(session: Session, base_code: str, owner_id: int | None = None) -> str:
+    existing = session.scalar(select(Project).where(Project.code == base_code))
+    if not existing or (owner_id and existing.owner_id == owner_id):
+        return base_code
+
+    for index in range(2, 100):
+        suffix = f"-{index}"
+        candidate = f"{base_code[:24 - len(suffix)]}{suffix}"
+        existing = session.scalar(select(Project).where(Project.code == candidate))
+        if not existing or (owner_id and existing.owner_id == owner_id):
+            return candidate
+    raise ValueError(f"Impossible de générer un code projet unique à partir de {base_code}.")
+
+
+def _project_period() -> tuple[date, date]:
+    today = date.today()
+    return date(today.year, 1, 1), date(today.year, 12, 31)
+
+
+def _ensure_project_budget(session: Session, project: Project, label: str, category: str) -> Budget:
+    budget = session.scalar(select(Budget).where(Budget.project_id == project.id).order_by(Budget.reference))
+    if not budget:
+        budget = Budget(
+            project_id=project.id,
+            reference=next_budget_reference(session, project.id),
+            label=label,
+            status="Actif",
+        )
+        session.add(budget)
+        session.flush()
+
+    line = session.scalar(select(BudgetLine).where(BudgetLine.budget_id == budget.id).order_by(BudgetLine.id))
+    if not line:
+        session.add(
+            BudgetLine(
+                project_id=project.id,
+                budget_id=budget.id,
+                category=category,
+                label=label,
+                planned_amount=Decimal("0.00"),
+                committed_amount=Decimal("0.00"),
+            )
+        )
+        session.flush()
+    return budget
+
+
+def _ensure_direct_project_tasks(
+    session: Session,
+    project: Project,
+    titles: list[str],
+    budget: Budget | None,
+    assigned_user_id: int | None = None,
+) -> None:
+    existing_titles = {
+        task.title.strip().lower()
+        for task in session.scalars(select(Task).where(Task.project_id == project.id)).all()
+    }
+    max_order = session.scalar(select(func.max(Task.sort_order)).where(Task.project_id == project.id)) or 0
+    for title in titles:
+        if title.strip().lower() in existing_titles:
+            continue
+        max_order += 10
+        task = Task(
+            project_id=project.id,
+            budget_id=budget.id if budget else None,
+            reference=next_task_reference(session, project.id),
+            title=title,
+            level=1,
+            parent_id=None,
+            status="Non commencé",
+            priority="Normale",
+            start_date=project.start_date,
+            due_date=project.end_date,
+            planned_hours=Decimal("0.00"),
+            planned_cost=Decimal("0.00"),
+            progress=0,
+            sort_order=int(max_order),
+        )
+        session.add(task)
+        session.flush()
+        if assigned_user_id:
+            assigned_user = session.get(User, assigned_user_id)
+            session.add(
+                TaskAssignment(
+                    task_id=task.id,
+                    user_id=assigned_user_id,
+                    role="Suivi personnel",
+                    planned_hours=Decimal("0.00"),
+                    cost_rate=assigned_user.hourly_rate if assigned_user else Decimal("0.00"),
+                )
+            )
+            session.flush()
+        existing_titles.add(title.strip().lower())
+
+
+def ensure_user_project(session: Session, user_id: int) -> Project:
+    user = session.get(User, user_id)
+    if not user:
+        raise ValueError("Utilisateur introuvable.")
+
+    project = session.scalar(
+        select(Project)
+        .where(Project.owner_id == user.id, Project.code.like("USER-%"))
+        .order_by(Project.id)
+    )
+    if not project:
+        start, end = _project_period()
+        code = _unique_project_code(session, user_project_code(user), user.id)
+        project = Project(
+            code=code,
+            name=f"Suivi utilisateur - {user.full_name}",
+            owner_id=user.id,
+            category="Utilisateur",
+            priority="Normale",
+            status="En cours",
+            start_date=start,
+            end_date=end,
+            budget_amount=Decimal("0.00"),
+            budget_hours=Decimal("0.00"),
+            description="Projet personnel pour absences, formations, aléas et objectifs personnels.",
+        )
+        session.add(project)
+        session.flush()
+
+    budget = _ensure_project_budget(session, project, "Temps utilisateur", "Temps utilisateur")
+    _ensure_direct_project_tasks(
+        session,
+        project,
+        ["Absences", "Formations", "Aléas", "Objectifs personnels"],
+        budget,
+        assigned_user_id=user.id,
+    )
+    recompute_actuals(session)
+    return project
+
+
+def ensure_support_project(session: Session) -> Project:
+    project = session.scalar(select(Project).where(Project.code == "SUPPORT"))
+    if not project:
+        start, end = _project_period()
+        project = Project(
+            code="SUPPORT",
+            name="Support services",
+            owner_id=None,
+            category="Support",
+            priority="Normale",
+            status="En cours",
+            start_date=start,
+            end_date=end,
+            budget_amount=Decimal("0.00"),
+            budget_hours=Decimal("0.00"),
+            description="Projet support pour suivre les temps d'assistance aux différents services.",
+        )
+        session.add(project)
+        session.flush()
+
+    budget = _ensure_project_budget(session, project, "Temps support", "Support")
+    _ensure_direct_project_tasks(
+        session,
+        project,
+        ["Support direction", "Support finance", "Support production", "Support IT", "Support commercial", "Support RH", "Autres supports"],
+        budget,
+    )
+    recompute_actuals(session)
+    return project
+
+
 def create_user(
     session: Session,
     username: str,
@@ -151,6 +375,9 @@ def create_user(
         hourly_rate=Decimal(str(hourly_rate)),
     )
     session.add(user)
+    session.flush()
+    ensure_user_project(session, user.id)
+    return user
 
 
 def create_project(
@@ -392,6 +619,30 @@ def tasks_df(session: Session, project_id: int | None = None) -> pd.DataFrame:
         tasks_by_id[task.id] = task
         project_meta[task.id] = (project_code, project_name)
     children_by_parent = _children_by_parent(list(tasks_by_id.values()))
+    future_planned_direct: dict[int, Decimal] = {}
+    if tasks_by_id:
+        future_planned_direct = dict(
+            session.execute(
+                select(PlannedTimeEntry.task_id, func.coalesce(func.sum(PlannedTimeEntry.hours), 0))
+                .where(
+                    PlannedTimeEntry.task_id.in_(list(tasks_by_id)),
+                    PlannedTimeEntry.entry_date >= date.today(),
+                )
+                .group_by(PlannedTimeEntry.task_id)
+            ).all()
+        )
+    future_planned_cache: dict[int, Decimal] = {}
+
+    def future_planned_hours(task: Task) -> Decimal:
+        if task.id in future_planned_cache:
+            return future_planned_cache[task.id]
+        children = children_by_parent.get(task.id, [])
+        if children:
+            total = sum((future_planned_hours(child) for child in children), Decimal("0.00"))
+        else:
+            total = Decimal(future_planned_direct.get(task.id, Decimal("0.00")))
+        future_planned_cache[task.id] = total
+        return total
 
     for siblings in children_by_parent.values():
         siblings.sort(key=lambda item: (item.sort_order, item.reference, item.id))
@@ -464,6 +715,7 @@ def tasks_df(session: Session, project_id: int | None = None) -> pd.DataFrame:
                 "Date de clôture": task.actual_end_date,
                 "Temps prévu": float(task.planned_hours),
                 "Temps passé": float(task.actual_hours),
+                "Temps planifié": float(future_planned_hours(task)),
                 "Coût prévu": float(task.planned_cost),
                 "Coût temps réel": float(task.actual_labor_cost),
                 "Dépense directe": float(task.actual_expense_amount),
@@ -543,32 +795,40 @@ def assignments_df(session: Session, project_id: int | None = None) -> pd.DataFr
     return pd.DataFrame(rows)
 
 
-def time_entries_df(session: Session, project_id: int | None = None) -> pd.DataFrame:
+def _time_entries_df(session: Session, entry_model, project_id: int | None = None, include_cost: bool = False) -> pd.DataFrame:
     stmt = (
-        select(TimeEntry, Project.code, Project.name, Task.reference, Task.title, User.full_name)
-        .join(Project, TimeEntry.project_id == Project.id)
-        .join(Task, TimeEntry.task_id == Task.id)
-        .join(User, TimeEntry.user_id == User.id)
-        .order_by(TimeEntry.entry_date.desc(), TimeEntry.id.desc())
+        select(entry_model, Project.code, Project.name, Task.reference, Task.title, User.full_name)
+        .join(Project, entry_model.project_id == Project.id)
+        .join(Task, entry_model.task_id == Task.id)
+        .join(User, entry_model.user_id == User.id)
+        .order_by(entry_model.entry_date.desc(), entry_model.id.desc())
     )
     if project_id:
-        stmt = stmt.where(TimeEntry.project_id == project_id)
+        stmt = stmt.where(entry_model.project_id == project_id)
     rows = []
     for entry, project_code, project_name, task_ref, task_title, user_name in session.execute(stmt):
-        rows.append(
-            {
-                "ID": entry.id,
-                "Date": entry.entry_date,
-                "Projet": f"{project_code} - {project_name}",
-                "Tâche": f"{task_ref} - {task_title}",
-                "Utilisateur": user_name,
-                "Heures": float(entry.hours),
-                "Taux": float(entry.cost_rate),
-                "Coût": float(entry.cost_amount),
-                "Note": entry.note or "",
-            }
-        )
+        row = {
+            "ID": entry.id,
+            "Date": entry.entry_date,
+            "Projet": f"{project_code} - {project_name}",
+            "Tâche": f"{task_ref} - {task_title}",
+            "Utilisateur": user_name,
+            "Heures": float(entry.hours),
+            "Note": entry.note or "",
+        }
+        if include_cost:
+            row["Taux"] = float(entry.cost_rate)
+            row["Coût"] = float(entry.cost_amount)
+        rows.append(row)
     return pd.DataFrame(rows)
+
+
+def time_entries_df(session: Session, project_id: int | None = None) -> pd.DataFrame:
+    return _time_entries_df(session, TimeEntry, project_id, include_cost=True)
+
+
+def planned_time_entries_df(session: Session, project_id: int | None = None) -> pd.DataFrame:
+    return _time_entries_df(session, PlannedTimeEntry, project_id, include_cost=False)
 
 
 WEEKDAY_LABELS = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
@@ -587,39 +847,83 @@ def week_day_columns(start: date) -> list[tuple[date, str]]:
     return [(day, f"{WEEKDAY_LABELS[index]} {day:%d/%m/%Y}") for index, day in enumerate(week_dates(start))]
 
 
-def weekly_timesheet_df(session: Session, project_id: int, user_id: int, start: date) -> pd.DataFrame:
+def _weekly_entries_df(session: Session, project_id: int, user_id: int, start: date, entry_model) -> pd.DataFrame:
     days = week_day_columns(start)
     day_dates = [day for day, _ in days]
-    tasks = direct_tasks(session, project_id)
+    tasks = project_tasks(session, project_id)
+    children_by_parent = _children_by_parent(tasks)
+    aggregate_ids = set(children_by_parent)
     totals = {
         (task_id, entry_date): hours
         for task_id, entry_date, hours in session.execute(
-            select(TimeEntry.task_id, TimeEntry.entry_date, func.coalesce(func.sum(TimeEntry.hours), 0))
+            select(entry_model.task_id, entry_model.entry_date, func.coalesce(func.sum(entry_model.hours), 0))
             .where(
-                TimeEntry.project_id == project_id,
-                TimeEntry.user_id == user_id,
-                TimeEntry.entry_date >= day_dates[0],
-                TimeEntry.entry_date <= day_dates[-1],
+                entry_model.project_id == project_id,
+                entry_model.user_id == user_id,
+                entry_model.entry_date >= day_dates[0],
+                entry_model.entry_date <= day_dates[-1],
             )
-            .group_by(TimeEntry.task_id, TimeEntry.entry_date)
+            .group_by(entry_model.task_id, entry_model.entry_date)
         ).all()
     }
+    descendant_cache: dict[int, list[int]] = {}
+
+    def descendant_ids(task_id: int) -> list[int]:
+        if task_id in descendant_cache:
+            return descendant_cache[task_id]
+        ids: list[int] = []
+        seen: set[int] = set()
+
+        def walk(parent_id: int) -> None:
+            for child in children_by_parent.get(parent_id, []):
+                if child.id in seen:
+                    continue
+                seen.add(child.id)
+                ids.append(child.id)
+                walk(child.id)
+
+        walk(task_id)
+        descendant_cache[task_id] = ids
+        return ids
 
     rows = []
     for task in tasks:
-        row = {"Tâche ID": task.id, "Tâche": f"{task_level_prefix(task.level)}{task.reference} - {task.title}"}
+        is_direct = task.id not in aggregate_ids
+        row = {
+            "Tâche ID": task.id,
+            "_time_editable": is_direct,
+            "Tâche": f"{task_level_prefix(task.level)}{task.reference} - {task.title}",
+            "Mode calcul": "Direct" if is_direct else "Agrégé",
+        }
         for day, label in days:
-            row[label] = float(totals.get((task.id, day), 0) or 0)
+            if is_direct:
+                hours = totals.get((task.id, day), 0)
+            else:
+                hours = sum(totals.get((child_id, day), 0) or 0 for child_id in descendant_ids(task.id))
+            row[label] = float(hours or 0)
         rows.append(row)
-    return pd.DataFrame(rows, columns=["Tâche ID", "Tâche"] + [label for _, label in days])
+    return pd.DataFrame(
+        rows,
+        columns=["Tâche ID", "_time_editable", "Tâche", "Mode calcul"] + [label for _, label in days],
+    )
 
 
-def save_weekly_timesheet(
+def weekly_timesheet_df(session: Session, project_id: int, user_id: int, start: date) -> pd.DataFrame:
+    return _weekly_entries_df(session, project_id, user_id, start, TimeEntry)
+
+
+def weekly_planning_df(session: Session, project_id: int, user_id: int, start: date) -> pd.DataFrame:
+    return _weekly_entries_df(session, project_id, user_id, start, PlannedTimeEntry)
+
+
+def _save_weekly_entries(
     session: Session,
     project_id: int,
     user_id: int,
     start: date,
     data: pd.DataFrame,
+    entry_model,
+    note: str,
 ) -> None:
     days = week_day_columns(start)
     day_dates = [day for day, _ in days]
@@ -631,12 +935,12 @@ def save_weekly_timesheet(
             task_ids.append(task_id)
     if task_ids:
         session.execute(
-            delete(TimeEntry).where(
-                TimeEntry.project_id == project_id,
-                TimeEntry.user_id == user_id,
-                TimeEntry.task_id.in_(task_ids),
-                TimeEntry.entry_date >= day_dates[0],
-                TimeEntry.entry_date <= day_dates[-1],
+            delete(entry_model).where(
+                entry_model.project_id == project_id,
+                entry_model.user_id == user_id,
+                entry_model.task_id.in_(task_ids),
+                entry_model.entry_date >= day_dates[0],
+                entry_model.entry_date <= day_dates[-1],
             )
         )
 
@@ -651,17 +955,37 @@ def save_weekly_timesheet(
                 raise ValueError("Chaque cellule de pointage doit être comprise entre 0 et 24 heures.")
             if hours > 0:
                 session.add(
-                    TimeEntry(
+                    entry_model(
                         project_id=project_id,
                         task_id=task_id,
                         user_id=user_id,
                         entry_date=day,
                         hours=Decimal(str(hours)),
-                        note="Saisie hebdomadaire",
+                        note=note,
                     )
                 )
     session.flush()
+
+
+def save_weekly_timesheet(
+    session: Session,
+    project_id: int,
+    user_id: int,
+    start: date,
+    data: pd.DataFrame,
+) -> None:
+    _save_weekly_entries(session, project_id, user_id, start, data, TimeEntry, "Saisie hebdomadaire")
     recompute_actuals(session)
+
+
+def save_weekly_planning(
+    session: Session,
+    project_id: int,
+    user_id: int,
+    start: date,
+    data: pd.DataFrame,
+) -> None:
+    _save_weekly_entries(session, project_id, user_id, start, data, PlannedTimeEntry, "Planification hebdomadaire")
 
 
 def starcost_hours_by_month_df(session: Session, project_id: int | None = None) -> pd.DataFrame:
@@ -819,6 +1143,9 @@ def budget_lines_df(session: Session, project_id: int | None = None, budget_id: 
 def users_df(session: Session) -> pd.DataFrame:
     rows = []
     for user in session.scalars(select(User).order_by(User.full_name)):
+        user_project = session.scalar(
+            select(Project).where(Project.owner_id == user.id, Project.code.like("USER-%")).order_by(Project.id)
+        )
         rows.append(
             {
                 "ID": user.id,
@@ -828,6 +1155,7 @@ def users_df(session: Session) -> pd.DataFrame:
                 "Rôle": user.role,
                 "Taux horaire": float(user.hourly_rate),
                 "Actif": user.active,
+                "Projet utilisateur": user_project.code if user_project else "",
             }
         )
     return pd.DataFrame(rows)
@@ -993,11 +1321,11 @@ def update_budget_lines_from_df(session: Session, data: pd.DataFrame, project_id
     recompute_actuals(session)
 
 
-def update_time_entries_from_df(session: Session, data: pd.DataFrame, project_id: int) -> None:
+def _update_time_entries_from_df(session: Session, data: pd.DataFrame, entry_model, project_id: int | None = None) -> None:
     users = user_name_options(session)
     tasks = direct_task_options(session, project_id)
     for row in data.to_dict("records"):
-        entry = session.get(TimeEntry, int(row["ID"]))
+        entry = session.get(entry_model, int(row["ID"]))
         if not entry:
             continue
         task_id = tasks.get(_text(row.get("Tâche")))
@@ -1006,14 +1334,23 @@ def update_time_entries_from_df(session: Session, data: pd.DataFrame, project_id
             raise ValueError("Pointage interdit : sélectionnez une tâche directe sans sous-tâche.")
         if not task_id or not user_id:
             raise ValueError("Chaque pointage doit conserver une tâche et un utilisateur valides.")
-        ensure_direct_time_task(session, task_id, project_id)
-        entry.project_id = project_id
+        task = ensure_direct_time_task(session, task_id, project_id)
+        entry.project_id = task.project_id
         entry.task_id = task_id
         entry.user_id = user_id
         entry.entry_date = _date(row.get("Date")) or date.today()
         entry.hours = Decimal(str(_float(row.get("Heures"))))
         entry.note = _text(row.get("Note")) or None
+    session.flush()
+
+
+def update_time_entries_from_df(session: Session, data: pd.DataFrame, project_id: int | None = None) -> None:
+    _update_time_entries_from_df(session, data, TimeEntry, project_id)
     recompute_actuals(session)
+
+
+def update_planned_time_entries_from_df(session: Session, data: pd.DataFrame, project_id: int | None = None) -> None:
+    _update_time_entries_from_df(session, data, PlannedTimeEntry, project_id)
 
 
 def update_users_from_df(session: Session, data: pd.DataFrame) -> None:
@@ -1055,10 +1392,14 @@ def _task_descendant_ids(session: Session, task_id: int) -> list[int]:
 
 def _count_task_links(session: Session, task_ids: list[int]) -> dict[str, int]:
     if not task_ids:
-        return {"assignments": 0, "time_entries": 0, "dependencies": 0}
+        return {"assignments": 0, "time_entries": 0, "planned_time_entries": 0, "dependencies": 0}
     return {
         "assignments": session.scalar(select(func.count(TaskAssignment.id)).where(TaskAssignment.task_id.in_(task_ids))) or 0,
         "time_entries": session.scalar(select(func.count(TimeEntry.id)).where(TimeEntry.task_id.in_(task_ids))) or 0,
+        "planned_time_entries": session.scalar(
+            select(func.count(PlannedTimeEntry.id)).where(PlannedTimeEntry.task_id.in_(task_ids))
+        )
+        or 0,
         "dependencies": session.scalar(
             select(func.count(TaskDependency.id)).where(
                 or_(TaskDependency.predecessor_id.in_(task_ids), TaskDependency.successor_id.in_(task_ids))
@@ -1083,6 +1424,7 @@ def deletion_preview(session: Session, entity: str, record_id: int) -> dict[str,
                 f"{len(task_ids)} tâche(s) supprimée(s)",
                 f"{task_links['assignments']} affectation(s) supprimée(s)",
                 f"{task_links['time_entries']} pointage(s) supprimé(s)",
+                f"{task_links['planned_time_entries']} planification(s) supprimée(s)",
                 f"{task_links['dependencies']} dépendance(s) supprimée(s)",
                 f"{budgets} budget(s) supprimé(s)",
                 f"{budget_lines} ligne(s) de frais supprimée(s)",
@@ -1101,6 +1443,7 @@ def deletion_preview(session: Session, entity: str, record_id: int) -> dict[str,
                 f"{len(task_ids) - 1} sous-tâche(s) supprimée(s)",
                 f"{task_links['assignments']} affectation(s) supprimée(s)",
                 f"{task_links['time_entries']} pointage(s) supprimé(s)",
+                f"{task_links['planned_time_entries']} planification(s) supprimée(s)",
                 f"{task_links['dependencies']} dépendance(s) supprimée(s)",
             ],
         }
@@ -1136,6 +1479,17 @@ def deletion_preview(session: Session, entity: str, record_id: int) -> dict[str,
         return {
             "label": f"{entry.entry_date} - {task.reference if task else entry.task_id} - {user.full_name if user else entry.user_id}",
             "impacts": ["1 pointage supprimé", "La tâche et le budget associé seront recalculés."],
+        }
+
+    if entity == "planned_time_entry":
+        entry = session.get(PlannedTimeEntry, record_id)
+        if not entry:
+            raise ValueError("Planification introuvable.")
+        task = session.get(Task, entry.task_id)
+        user = session.get(User, entry.user_id)
+        return {
+            "label": f"{entry.entry_date} - {task.reference if task else entry.task_id} - {user.full_name if user else entry.user_id}",
+            "impacts": ["1 ligne de planification supprimée", "Le temps planifié futur de la tâche sera recalculé."],
         }
 
     if entity == "budget":
@@ -1176,12 +1530,16 @@ def deletion_preview(session: Session, entity: str, record_id: int) -> dict[str,
         owned_projects = session.scalar(select(func.count(Project.id)).where(Project.owner_id == user.id)) or 0
         assignments = session.scalar(select(func.count(TaskAssignment.id)).where(TaskAssignment.user_id == user.id)) or 0
         time_entries = session.scalar(select(func.count(TimeEntry.id)).where(TimeEntry.user_id == user.id)) or 0
+        planned_time_entries = (
+            session.scalar(select(func.count(PlannedTimeEntry.id)).where(PlannedTimeEntry.user_id == user.id)) or 0
+        )
         return {
             "label": user.full_name,
             "impacts": [
                 f"{owned_projects} projet(s) sans responsable",
                 f"{assignments} affectation(s) supprimée(s)",
                 f"{time_entries} pointage(s) supprimé(s)",
+                f"{planned_time_entries} planification(s) supprimée(s)",
             ],
         }
 
@@ -1249,6 +1607,14 @@ def delete_record(session: Session, entity: str, record_id: int) -> None:
         recompute_actuals(session)
         return
 
+    if entity == "planned_time_entry":
+        entry = session.get(PlannedTimeEntry, record_id)
+        if not entry:
+            raise ValueError("Planification introuvable.")
+        session.delete(entry)
+        session.flush()
+        return
+
     if entity == "budget":
         budget = session.get(Budget, record_id)
         if not budget:
@@ -1288,6 +1654,7 @@ def delete_record(session: Session, entity: str, record_id: int) -> None:
             project.owner_id = None
         session.execute(delete(TaskAssignment).where(TaskAssignment.user_id == user.id))
         session.execute(delete(TimeEntry).where(TimeEntry.user_id == user.id))
+        session.execute(delete(PlannedTimeEntry).where(PlannedTimeEntry.user_id == user.id))
         session.delete(user)
         session.flush()
         recompute_actuals(session)

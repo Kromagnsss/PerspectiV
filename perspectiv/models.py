@@ -25,6 +25,7 @@ class User(Base):
 
     assignments: Mapped[list["TaskAssignment"]] = relationship(back_populates="user")
     time_entries: Mapped[list["TimeEntry"]] = relationship(back_populates="user")
+    planned_time_entries: Mapped[list["PlannedTimeEntry"]] = relationship(back_populates="user")
 
 
 class Project(Base):
@@ -47,6 +48,9 @@ class Project(Base):
     owner: Mapped[User | None] = relationship()
     tasks: Mapped[list["Task"]] = relationship(back_populates="project", cascade="all, delete-orphan")
     time_entries: Mapped[list["TimeEntry"]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    planned_time_entries: Mapped[list["PlannedTimeEntry"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
     budgets: Mapped[list["Budget"]] = relationship(back_populates="project", cascade="all, delete-orphan")
     budget_lines: Mapped[list["BudgetLine"]] = relationship(back_populates="project", cascade="all, delete-orphan")
 
@@ -84,6 +88,9 @@ class Task(Base):
     parent: Mapped["Task | None"] = relationship(remote_side=[id])
     assignments: Mapped[list["TaskAssignment"]] = relationship(back_populates="task", cascade="all, delete-orphan")
     time_entries: Mapped[list["TimeEntry"]] = relationship(back_populates="task", cascade="all, delete-orphan")
+    planned_time_entries: Mapped[list["PlannedTimeEntry"]] = relationship(
+        back_populates="task", cascade="all, delete-orphan"
+    )
 
 
 class TaskAssignment(Base):
@@ -129,6 +136,23 @@ class TimeEntry(Base):
     project: Mapped[Project] = relationship(back_populates="time_entries")
     task: Mapped[Task] = relationship(back_populates="time_entries")
     user: Mapped[User] = relationship(back_populates="time_entries")
+
+
+class PlannedTimeEntry(Base):
+    __tablename__ = "planned_time_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    entry_date: Mapped[date] = mapped_column(Date, default=date.today)
+    hours: Mapped[Decimal] = mapped_column(Numeric(8, 2), default=Decimal("0.00"))
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    project: Mapped[Project] = relationship(back_populates="planned_time_entries")
+    task: Mapped[Task] = relationship(back_populates="planned_time_entries")
+    user: Mapped[User] = relationship(back_populates="planned_time_entries")
 
 
 class Budget(Base):

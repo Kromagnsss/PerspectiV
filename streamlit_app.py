@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 
 import pandas as pd
@@ -39,19 +40,24 @@ from perspectiv.services import (
     deletion_preview,
     dependencies_df,
     direct_task_options,
+    ensure_support_project,
+    ensure_user_project,
     get_project,
     kpis,
     monthly_completion_df,
+    planned_time_entries_df,
     project_options,
     projects_df,
     starcost_hours_by_month_df,
     task_options,
     tasks_df,
     time_entries_df,
+    save_weekly_planning,
     save_weekly_timesheet,
     update_budget_from_df,
     update_budget_lines_from_df,
     update_projects_from_df,
+    update_planned_time_entries_from_df,
     update_tasks_from_df,
     update_time_entries_from_df,
     update_task_budget_and_expense,
@@ -60,6 +66,7 @@ from perspectiv.services import (
     user_options,
     week_day_columns,
     week_start,
+    weekly_planning_df,
     weekly_timesheet_df,
     users_df,
 )
@@ -67,9 +74,31 @@ from perspectiv.services import (
 
 st.set_page_config(page_title="PerspectiV", layout="wide")
 init_db()
+with session_scope() as session:
+    ensure_support_project(session)
 
 
-PAGES = ["Tableau de bord", "Projets", "Tâches et Gantt", "Timesheet", "Budget", "Rapports PDF", "Utilisateurs"]
+PAGES = [
+    "Tableau de bord",
+    "Projets",
+    "Tâches et Gantt",
+    "Timesheet",
+    "Planification",
+    "Budget",
+    "Rapports PDF",
+    "Utilisateurs",
+]
+
+PAGE_ICONS = {
+    "Tableau de bord": ":material/dashboard:",
+    "Projets": ":material/folder_open:",
+    "Tâches et Gantt": ":material/account_tree:",
+    "Timesheet": ":material/schedule:",
+    "Planification": ":material/event_available:",
+    "Budget": ":material/account_balance_wallet:",
+    "Rapports PDF": ":material/picture_as_pdf:",
+    "Utilisateurs": ":material/group:",
+}
 
 LEVEL_COLORS = {
     1: "#f3f4f6",
@@ -85,6 +114,56 @@ LEVEL_TEXT_STYLES = {
     4: "font-style: italic; font-size: 12px;",
 }
 
+DAY_INITIALS = ["L", "M", "M", "J", "V", "S", "D"]
+TODAY_COLUMN_COLOR = "#ffedd5"
+TODAY_COLUMN_STRONG_COLOR = "#fed7aa"
+TODAY_COLUMN_TEXT = "#9a3412"
+TODAY_COLUMN_BORDER = "#fdba74"
+TODAY_AGGRID_CSS = {
+    ".today-column-header": {
+        "background-color": f"{TODAY_COLUMN_COLOR} !important",
+        "border-left": f"1px solid {TODAY_COLUMN_BORDER} !important",
+        "border-right": f"1px solid {TODAY_COLUMN_BORDER} !important",
+        "font-weight": "700 !important",
+    },
+    ".today-column-header .ag-header-cell-label": {
+        "color": f"{TODAY_COLUMN_TEXT} !important",
+        "justify-content": "center",
+    },
+    ".vertical-day-header": {
+        "align-items": "center !important",
+        "justify-content": "center !important",
+        "padding": "2px 0 !important",
+    },
+    ".vertical-day-header .ag-header-cell-label": {
+        "align-items": "center !important",
+        "justify-content": "center !important",
+        "height": "100% !important",
+        "line-height": "1.05 !important",
+        "writing-mode": "vertical-rl",
+        "transform": "rotate(180deg)",
+        "white-space": "nowrap",
+    },
+    ".vertical-day-header .ag-header-cell-text": {
+        "overflow": "visible !important",
+        "text-overflow": "clip !important",
+    },
+    ".week-group-header .ag-header-group-cell-label": {
+        "justify-content": "center",
+        "font-weight": "700",
+    },
+    ".week-day-header .ag-header-cell-label": {
+        "justify-content": "center",
+    },
+    ".weekend-column-header": {
+        "background-color": "#eef0f3 !important",
+    },
+    ".weekend-column-header .ag-header-cell-label": {
+        "color": "#374151 !important",
+        "justify-content": "center",
+    },
+}
+
 TASK_DISPLAY_COLUMNS = [
     "Libellé",
     "Niveau",
@@ -97,6 +176,7 @@ TASK_DISPLAY_COLUMNS = [
     "Date de clôture",
     "Temps prévu",
     "Temps passé",
+    "Temps planifié",
     "Coût prévu",
     "Dépense directe",
     "Coût réel total",
@@ -144,6 +224,7 @@ def styled_task_table(data: pd.DataFrame):
     number_columns = [
         "Temps prévu",
         "Temps passé",
+        "Temps planifié",
         "Coût prévu",
         "Dépense directe",
         "Coût réel total",
@@ -253,6 +334,11 @@ def row_delete_label(row: dict, columns: list[str]) -> str:
             parts.append(str(value).strip())
     label = " - ".join(parts) if parts else "Enregistrement"
     return f"{label} (ID {row.get('ID')})"
+
+
+def top_right_save_button(key: str, button_type: str = "primary") -> bool:
+    _, button_col = st.columns([5, 1], vertical_alignment="bottom")
+    return button_col.button("Enregistrer", type=button_type, key=key, use_container_width=True)
 
 
 def delete_record_control(
@@ -395,6 +481,7 @@ def task_color_options(task_data: pd.DataFrame) -> list[str]:
     candidates = [
         "Temps prévu",
         "Temps passé",
+        "Temps planifié",
         "Coût prévu",
         "Coût temps réel",
         "Dépense directe",
@@ -507,6 +594,7 @@ def task_editor(
         {"field": "Date de clôture", "editable": True, "width": 145},
         {"field": "Temps prévu", "editable": True, "width": 125, "type": "numericColumn"},
         {"field": "Temps passé", "editable": False, "width": 125, "type": "numericColumn"},
+        {"field": "Temps planifié", "editable": False, "width": 140, "type": "numericColumn"},
         {"field": "Coût prévu", "editable": True, "width": 120, "type": "numericColumn"},
         {"field": "Coût temps réel", "editable": False, "width": 140, "type": "numericColumn"},
         {"field": "Dépense directe", "editable": True, "width": 145, "type": "numericColumn"},
@@ -546,6 +634,369 @@ def task_editor(
         key=f"tasks_grid_{project_id}",
     )
     return aggrid_data(response, grid_data)
+
+
+def weekly_timesheet_editor(
+    weekly_data: pd.DataFrame,
+    day_columns: list[str],
+    project_key: str,
+    user_id: int,
+    selected_week: date,
+    grid_key_prefix: str = "weekly_timesheet",
+    user_label: str | None = None,
+) -> pd.DataFrame:
+    grid_data = weekly_data.copy()
+    total_label = f"Total {user_label or 'utilisateur'}"
+    week_specs = [
+        {"date": day, "field": label, "day": DAY_INITIALS[index], "weekend": index >= 5}
+        for index, (day, label) in enumerate(week_day_columns(selected_week))
+        if label in day_columns
+    ]
+    _, week_number, _ = week_start(selected_week).isocalendar()
+    week_label = f"S{week_number:02d}"
+    today_columns = {
+        str(spec["field"]) for spec in week_specs if spec["date"] == date.today()
+    }
+    weekend_columns = {str(spec["field"]) for spec in week_specs if spec["weekend"]}
+    editable_rows = (
+        grid_data["_time_editable"].astype(str).str.lower().isin(["true", "1", "yes"])
+        if "_time_editable" in grid_data.columns
+        else pd.Series(True, index=grid_data.index)
+    )
+    pinned_total_row = {
+        "Projet ID": None,
+        "Tâche ID": None,
+        "_time_editable": False,
+        "Projet": "",
+        "Tâche": total_label,
+        "Mode calcul": "Agrégé",
+    }
+    for label in day_columns:
+        pinned_total_row[label] = float(
+            pd.to_numeric(grid_data.loc[editable_rows, label], errors="coerce").fillna(0).sum()
+        )
+    editable_cell = JsCode(
+        """
+        function(params) {
+            return params.node && params.node.rowPinned !== 'bottom' && params.data && params.data._time_editable === true;
+        }
+        """
+    )
+    row_style = JsCode(
+        """
+        function(params) {
+            const base = {fontSize: '13px', color: '#111827'};
+            if (params.node && params.node.rowPinned === 'bottom') {
+                return {...base, backgroundColor: '#fef3c7', fontWeight: '700', borderTop: '2px solid #d6b247'};
+            }
+            if (params.data && params.data._time_editable !== true) {
+                return {...base, backgroundColor: '#eef2f7', color: '#64748b', fontStyle: 'italic'};
+            }
+            return {...base, backgroundColor: '#ffffff'};
+        }
+        """
+    )
+    day_cell_style = JsCode(
+        f"""
+        function(params) {{
+            const todayColumns = {json.dumps(sorted(today_columns), ensure_ascii=False)};
+            const weekendColumns = {json.dumps(sorted(weekend_columns), ensure_ascii=False)};
+            const isToday = todayColumns.includes(params.colDef.field);
+            const isWeekend = weekendColumns.includes(params.colDef.field);
+            if (params.node && params.node.rowPinned === 'bottom') {{
+                if (isToday) {{
+                    return {{backgroundColor: '{TODAY_COLUMN_STRONG_COLOR}', color: '{TODAY_COLUMN_TEXT}', fontWeight: '700'}};
+                }}
+                return {{backgroundColor: '#fef3c7', color: '#111827', fontWeight: '700'}};
+            }}
+            if (params.data && params.data._time_editable !== true) {{
+                if (isToday) {{
+                    return {{backgroundColor: '{TODAY_COLUMN_COLOR}', color: '#64748b'}};
+                }}
+                if (isWeekend) {{
+                    return {{backgroundColor: '#e5e7eb', color: '#64748b'}};
+                }}
+                return {{backgroundColor: '#e5e7eb', color: '#64748b'}};
+            }}
+            if (isToday) {{
+                return {{backgroundColor: '{TODAY_COLUMN_COLOR}', color: '#111827'}};
+            }}
+            if (isWeekend) {{
+                return {{backgroundColor: '#eef0f3', color: '#374151'}};
+            }}
+            return {{backgroundColor: '#ffffff', color: '#111827'}};
+        }}
+        """
+    )
+    hour_parser = JsCode(
+        """
+        function(params) {
+            if (params.newValue === null || params.newValue === undefined || params.newValue === '') {
+                return 0;
+            }
+            const value = Number(String(params.newValue).replace(',', '.'));
+            if (Number.isNaN(value)) {
+                return params.oldValue || 0;
+            }
+            return Math.max(0, Math.min(24, value));
+        }
+        """
+    )
+    refresh_totals = JsCode(
+        f"""
+        function(params) {{
+            const dayColumns = {json.dumps(day_columns, ensure_ascii=False)};
+            const totalRow = {{
+                "Projet ID": null,
+                "Tâche ID": null,
+                "_time_editable": false,
+                "Projet": "",
+                "Tâche": {json.dumps(total_label, ensure_ascii=False)},
+                "Mode calcul": "Agrégé"
+            }};
+            dayColumns.forEach(function(column) {{
+                totalRow[column] = 0;
+            }});
+            params.api.forEachNode(function(node) {{
+                if (!node.rowPinned && node.data && node.data._time_editable === true) {{
+                    dayColumns.forEach(function(column) {{
+                        const rawValue = node.data[column];
+                        const value = Number(String(rawValue === null || rawValue === undefined ? 0 : rawValue).replace(',', '.'));
+                        if (!Number.isNaN(value)) {{
+                            totalRow[column] += value;
+                        }}
+                    }});
+                }}
+            }});
+            dayColumns.forEach(function(column) {{
+                totalRow[column] = Math.round((totalRow[column] + Number.EPSILON) * 100) / 100;
+            }});
+            if (params.api.setGridOption) {{
+                params.api.setGridOption('pinnedBottomRowData', [totalRow]);
+            }} else if (params.api.setPinnedBottomRowData) {{
+                params.api.setPinnedBottomRowData([totalRow]);
+            }}
+        }}
+        """
+    )
+    column_defs = [
+        {"field": "Projet ID", "hide": True, "editable": False},
+        {"field": "Tâche ID", "hide": True, "editable": False},
+        {"field": "_time_editable", "hide": True, "editable": False},
+        {"field": "Projet", "editable": False, "pinned": "left", "width": 180},
+        {"field": "Tâche", "editable": False, "pinned": "left", "width": 360},
+        {"field": "Mode calcul", "editable": False, "width": 105},
+    ]
+    day_children = []
+    for spec in week_specs:
+        field = str(spec["field"])
+        header_classes = ["week-day-header"]
+        if field in weekend_columns:
+            header_classes.append("weekend-column-header")
+        if field in today_columns:
+            header_classes.append("today-column-header")
+        day_children.append(
+            {
+                "field": field,
+                "headerName": str(spec["day"]),
+                "editable": editable_cell,
+                "filter": False,
+                "resizable": False,
+                "suppressMenu": True,
+                "suppressHeaderMenuButton": True,
+                "menuTabs": [],
+                "cellStyle": day_cell_style,
+                "valueParser": hour_parser,
+                "type": "numericColumn",
+                "width": 48,
+                "minWidth": 44,
+                "maxWidth": 54,
+                "headerClass": " ".join(header_classes),
+            }
+        )
+    column_defs.append({"headerName": week_label, "headerClass": "week-group-header", "children": day_children})
+    grid_options = {
+        "columnDefs": column_defs,
+        "defaultColDef": {
+            "filter": True,
+            "sortable": False,
+            "resizable": True,
+            "minWidth": 90,
+        },
+        "getRowStyle": row_style,
+        "rowSelection": "single",
+        "stopEditingWhenCellsLoseFocus": True,
+        "singleClickEdit": True,
+        "animateRows": False,
+        "rowHeight": 30,
+        "pinnedBottomRowHeight": 32,
+        "headerHeight": 32,
+        "groupHeaderHeight": 30,
+        "suppressMovableColumns": True,
+        "pinnedBottomRowData": [pinned_total_row],
+        "onGridReady": refresh_totals,
+        "onCellValueChanged": refresh_totals,
+    }
+    response = AgGrid(
+        grid_data,
+        gridOptions=grid_options,
+        height=max(260, min(720, 110 + len(grid_data) * 30)),
+        data_return_mode=DataReturnMode.AS_INPUT,
+        update_on=["cellValueChanged"],
+        allow_unsafe_jscode=True,
+        theme="streamlit",
+        show_toolbar=True,
+        show_search=True,
+        show_download_button=False,
+        custom_css=TODAY_AGGRID_CSS,
+        key=f"{grid_key_prefix}_{project_key}_{user_id}_{selected_week:%Y%m%d}",
+    )
+    return aggrid_data(response, grid_data)
+
+
+def recap_period_weeks(start_day: date) -> list[date]:
+    start_week = week_start(start_day)
+    return [start_week + timedelta(days=7 * index) for index in range(4)]
+
+
+def time_recap_table_data(entries: pd.DataFrame, start_day: date) -> tuple[pd.DataFrame, list[dict[str, object]]]:
+    weeks = recap_period_weeks(start_day)
+    period_start = weeks[0]
+    period_end = weeks[-1] + timedelta(days=6)
+    day_specs: list[dict[str, object]] = []
+    for week_index, week in enumerate(weeks):
+        _, week_number, _ = week.isocalendar()
+        for day_index in range(7):
+            current_day = week + timedelta(days=day_index)
+            day_specs.append(
+                {
+                    "field": f"w{week_index}_d{day_index}",
+                    "week": f"S{week_number:02d}",
+                    "day": DAY_INITIALS[day_index],
+                    "date": current_day,
+                    "weekend": day_index >= 5,
+                }
+            )
+
+    columns = ["Utilisateur", "Tâche"] + [str(spec["field"]) for spec in day_specs]
+    if entries.empty:
+        return pd.DataFrame(columns=columns), day_specs
+
+    data = entries.copy()
+    data["Date"] = pd.to_datetime(data["Date"], errors="coerce").dt.date
+    data["Heures"] = pd.to_numeric(data["Heures"], errors="coerce").fillna(0)
+    data = data[
+        data["Date"].notna()
+        & (data["Date"] >= period_start)
+        & (data["Date"] <= period_end)
+        & (data["Heures"] > 0)
+    ].copy()
+    if data.empty:
+        return pd.DataFrame(columns=columns), day_specs
+
+    date_to_field = {spec["date"]: str(spec["field"]) for spec in day_specs}
+    rows_by_key: dict[tuple[str, str], dict[str, object]] = {}
+    for row in data.to_dict("records"):
+        field = date_to_field.get(row.get("Date"))
+        if not field:
+            continue
+        user = str(row.get("Utilisateur") or "").strip()
+        task = f"{row.get('Projet') or ''} · {row.get('Tâche') or ''}".strip(" ·")
+        key = (user, task)
+        output_row = rows_by_key.setdefault(
+            key,
+            {"Utilisateur": user, "Tâche": task, **{str(spec["field"]): 0.0 for spec in day_specs}},
+        )
+        output_row[field] = float(output_row.get(field) or 0) + float(row.get("Heures") or 0)
+
+    if not rows_by_key:
+        return pd.DataFrame(columns=columns), day_specs
+    rows = sorted(rows_by_key.values(), key=lambda item: (str(item["Utilisateur"]).lower(), str(item["Tâche"]).lower()))
+    return pd.DataFrame(rows, columns=columns), day_specs
+
+
+def time_recap_grid(data: pd.DataFrame, day_specs: list[dict[str, object]], key: str):
+    number_formatter = JsCode(
+        """
+        function(params) {
+            const value = Number(params.value || 0);
+            if (!value) {
+                return '';
+            }
+            return value.toLocaleString('fr-FR', {maximumFractionDigits: 2});
+        }
+        """
+    )
+    column_defs = [
+        {"field": "Utilisateur", "pinned": "left", "editable": False, "width": 135, "minWidth": 110, "filter": True},
+        {"field": "Tâche", "pinned": "left", "editable": False, "width": 270, "minWidth": 220, "filter": True},
+    ]
+    for week_label in dict.fromkeys(str(spec["week"]) for spec in day_specs):
+        week_children = []
+        for spec in [item for item in day_specs if str(item["week"]) == week_label]:
+            weekend = bool(spec["weekend"])
+            is_today = spec["date"] == date.today()
+            background_color = TODAY_COLUMN_COLOR if is_today else ("#eef0f3" if weekend else "#ffffff")
+            text_color = TODAY_COLUMN_TEXT if is_today else ("#374151" if weekend else "#111827")
+            week_children.append(
+                {
+                    "field": str(spec["field"]),
+                    "headerName": str(spec["day"]),
+                    "editable": False,
+                    "filter": False,
+                    "sortable": False,
+                    "resizable": False,
+                    "suppressMenu": True,
+                    "suppressHeaderMenuButton": True,
+                    "menuTabs": [],
+                    "type": "numericColumn",
+                    "width": 30,
+                    "minWidth": 28,
+                    "maxWidth": 36,
+                    **({"headerClass": "today-column-header"} if is_today else {}),
+                    "valueFormatter": number_formatter,
+                    "cellStyle": {
+                        "backgroundColor": background_color,
+                        "color": text_color,
+                        **({"fontWeight": "700"} if is_today else {}),
+                    },
+                }
+            )
+        column_defs.append({"headerName": week_label, "children": week_children})
+
+    grid_options = {
+        "columnDefs": column_defs,
+        "defaultColDef": {
+            "editable": False,
+            "filter": False,
+            "sortable": False,
+            "resizable": True,
+            "minWidth": 28,
+            "suppressMenu": True,
+            "suppressHeaderMenuButton": True,
+            "menuTabs": [],
+        },
+        "rowSelection": "single",
+        "animateRows": False,
+        "rowHeight": 30,
+        "headerHeight": 30,
+        "groupHeaderHeight": 30,
+        "suppressMovableColumns": True,
+    }
+    return AgGrid(
+        data,
+        gridOptions=grid_options,
+        height=max(260, min(720, 95 + len(data) * 30)),
+        data_return_mode=DataReturnMode.AS_INPUT,
+        allow_unsafe_jscode=True,
+        theme="streamlit",
+        show_toolbar=True,
+        show_search=True,
+        show_download_button=True,
+        fit_columns_on_grid_load=True,
+        custom_css=TODAY_AGGRID_CSS,
+        key=key,
+    )
 
 
 def task_tree(data: pd.DataFrame) -> tuple[list[dict], dict[str, list[dict]]]:
@@ -607,8 +1058,109 @@ def inject_css() -> None:
             border-radius: 8px;
             padding: 12px 14px;
         }
-        [data-testid="stSidebar"] {background: #111827;}
+        [data-testid="stSidebar"] {
+            background: #111827;
+            border-right: 1px solid #1f2937;
+        }
         [data-testid="stSidebar"] * {color: #f8fafc;}
+        [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {gap: 0.35rem;}
+        [data-testid="stSidebar"] button {
+            background: #172033 !important;
+            border: 1px solid #2b3a55 !important;
+            color: #e5edf7 !important;
+            justify-content: flex-start;
+            min-height: 2.25rem;
+            overflow: hidden;
+            white-space: nowrap;
+            box-shadow: none !important;
+        }
+        [data-testid="stSidebar"] button:hover {
+            background: #22304a !important;
+            border-color: #4f7df3 !important;
+            color: #ffffff !important;
+        }
+        [data-testid="stSidebar"] button:focus-visible {
+            outline: 2px solid #93c5fd !important;
+            outline-offset: 2px;
+        }
+        [data-testid="stSidebar"] button[kind="primary"],
+        [data-testid="stSidebar"] [data-testid="stBaseButton-primary"] {
+            background: #3567e8 !important;
+            border-color: #4f7df3 !important;
+            color: #ffffff !important;
+        }
+        [data-testid="stSidebar"] button[kind="secondary"],
+        [data-testid="stSidebar"] [data-testid="stBaseButton-secondary"] {
+            background: #172033 !important;
+            border-color: #2b3a55 !important;
+            color: #e5edf7 !important;
+        }
+        [data-testid="stSidebar"] button[kind="secondary"]:hover,
+        [data-testid="stSidebar"] [data-testid="stBaseButton-secondary"]:hover {
+            background: #22304a !important;
+            border-color: #4f7df3 !important;
+            color: #ffffff !important;
+        }
+        [data-testid="stSidebar"] button[kind="primary"]:hover,
+        [data-testid="stSidebar"] [data-testid="stBaseButton-primary"]:hover {
+            background: #2f5ed8 !important;
+            border-color: #7aa2ff !important;
+            color: #ffffff !important;
+        }
+        [data-testid="stSidebar"] button *,
+        [data-testid="stSidebar"] button p,
+        [data-testid="stSidebar"] button span {
+            color: inherit !important;
+        }
+        [data-testid="stSidebar"] button [data-testid="stIconMaterial"],
+        [data-testid="stSidebar"] button svg,
+        [data-testid="stSidebar"] button span[aria-hidden="true"] {
+            flex: 0 0 auto;
+            margin-right: 0.35rem;
+        }
+        [data-testid="stSidebar"] button p {
+            color: inherit !important;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        section[data-testid="stSidebar"][aria-expanded="false"] {
+            display: block;
+            min-width: 2.55rem !important;
+            max-width: 2.55rem !important;
+            width: 2.55rem !important;
+            margin-left: 0 !important;
+            transform: translateX(0) !important;
+        }
+        section[data-testid="stSidebar"][aria-expanded="false"] > div:first-child {
+            min-width: 2.55rem !important;
+            max-width: 2.55rem !important;
+            width: 2.55rem !important;
+            padding-left: 0.28rem;
+            padding-right: 0.28rem;
+            overflow: hidden;
+        }
+        section[data-testid="stSidebar"][aria-expanded="false"] h1,
+        section[data-testid="stSidebar"][aria-expanded="false"] [data-testid="stCaptionContainer"] {
+            display: none;
+        }
+        section[data-testid="stSidebar"][aria-expanded="false"] button {
+            min-width: 1.9rem !important;
+            max-width: 1.9rem !important;
+            width: 1.9rem !important;
+            height: 2.1rem;
+            padding-left: 0.38rem;
+            padding-right: 0;
+            justify-content: flex-start;
+        }
+        section[data-testid="stSidebar"][aria-expanded="false"] button [data-testid="stIconMaterial"],
+        section[data-testid="stSidebar"][aria-expanded="false"] button svg,
+        section[data-testid="stSidebar"][aria-expanded="false"] button span[aria-hidden="true"] {
+            margin-right: 0;
+        }
+        section[data-testid="stSidebar"][aria-expanded="false"] button p {
+            display: none;
+        }
         h1, h2, h3 {letter-spacing: 0;}
         </style>
         """,
@@ -649,15 +1201,21 @@ def sidebar() -> str:
 
     st.sidebar.title("PerspectiV")
     st.sidebar.caption(f"{user['name']} · {user['role']}")
-    page = st.sidebar.radio(
-        "Navigation",
-        PAGES,
-        key="navigation_page",
-    )
-    if st.sidebar.button("Déconnexion", use_container_width=True):
+    page = st.session_state["navigation_page"]
+    for index, nav_page in enumerate(PAGES):
+        if st.sidebar.button(
+            nav_page,
+            key=f"nav_page_{index}",
+            icon=PAGE_ICONS.get(nav_page),
+            type="primary" if nav_page == page else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state["navigation_page"] = nav_page
+            st.rerun()
+    if st.sidebar.button("Déconnexion", icon=":material/logout:", use_container_width=True):
         st.session_state.clear()
         st.rerun()
-    return page
+    return st.session_state["navigation_page"]
 
 
 def select_project(label: str = "Projet", include_all: bool = False) -> int | None:
@@ -790,6 +1348,7 @@ def show_projects() -> None:
 
     gantt_container = st.container()
     st.subheader("Table projets")
+    save_projects = top_right_save_button("projects_save")
     table_container = st.container()
     with table_container:
         grid_response = project_grid(data, user_names)
@@ -802,7 +1361,7 @@ def show_projects() -> None:
     with gantt_container:
         st.plotly_chart(projects_gantt(edited, color_field), width="stretch")
 
-    if st.button("Enregistrer les modifications projets", type="primary"):
+    if save_projects:
         try:
             with session_scope() as session:
                 update_projects_from_df(session, edited)
@@ -840,13 +1399,14 @@ def show_tasks() -> None:
         color_field = st.selectbox("Colorer les tâches par", color_options or ["Temps prévu"], index=0)
         gantt_container = st.container()
         st.subheader("Table tâches")
+        save_tasks = top_right_save_button(f"tasks_save_{project_id}")
         edited_tasks = task_editor(task_data, task_labels, budget_labels, project_id)
         with gantt_container:
             st.plotly_chart(gantt_figure(edited_tasks, color_field), width="stretch")
         if not deps.empty:
             st.caption("Dépendances")
             st.dataframe(deps[["Prédécesseur", "Successeur", "Type", "Décalage"]], width="stretch", hide_index=True)
-        if st.button("Enregistrer les modifications tâches", type="primary"):
+        if save_tasks:
             try:
                 with session_scope() as session:
                     update_tasks_from_df(session, edited_tasks, project_id)
@@ -1025,6 +1585,7 @@ def legacy_show_timesheet() -> None:
             st.rerun()
 
     st.plotly_chart(hours_by_user_bar(entries), use_container_width=True)
+    save_legacy_timesheet = top_right_save_button(f"legacy_timesheet_save_{project_id}")
     edited_entries = st.data_editor(
         entries,
         key=f"time_editor_{project_id}",
@@ -1038,7 +1599,7 @@ def legacy_show_timesheet() -> None:
             "Heures": st.column_config.NumberColumn("Heures", min_value=0.0, max_value=24.0, step=0.25),
         },
     )
-    if st.button("Enregistrer les modifications timesheet", type="primary"):
+    if save_legacy_timesheet:
         try:
             with session_scope() as session:
                 update_time_entries_from_df(session, edited_entries, project_id)
@@ -1051,69 +1612,130 @@ def legacy_show_timesheet() -> None:
     delete_record_control("time_entry", entries, ["Date", "Tâche", "Utilisateur"], f"time_entries_{project_id}")
 
 
-def show_timesheet() -> None:
-    st.title("Timesheet")
-    project_id = select_project()
-    if not project_id:
-        return
+def show_weekly_time_capture(
+    title: str,
+    key_prefix: str,
+    weekly_df_func,
+    entries_df_func,
+    save_weekly_func,
+    update_entries_func,
+    delete_entity: str,
+    history_title: str,
+    empty_grid_message: str,
+    empty_history_message: str,
+    save_success: str,
+    update_success: str,
+    caption_extra: str = "",
+    title_level: str = "title",
+) -> None:
+    if title:
+        if title_level == "subheader":
+            st.subheader(title)
+        else:
+            st.title(title)
 
     with session_scope() as session:
+        project_labels = project_options(session)
         user_names = user_name_options(session)
 
+    if not project_labels:
+        st.warning("Créez d'abord un projet.")
+        return
     if not user_names:
         st.warning("Aucun utilisateur actif disponible.")
         return
 
-    c1, c2, c3, c4 = st.columns([3, 1, 3, 1])
+    project_label_list = list(project_labels.keys())
+    project_label_by_id = {project_id: label for label, project_id in project_labels.items()}
+    default_project = project_label_by_id.get(st.session_state.get("selected_project_id"), project_label_list[0])
+    project_selector_key = f"{key_prefix}_project_labels"
+    existing_projects = st.session_state.get(project_selector_key)
+    if isinstance(existing_projects, list):
+        valid_existing = [label for label in existing_projects if label in project_labels]
+        st.session_state[project_selector_key] = valid_existing or [default_project]
+    else:
+        st.session_state[project_selector_key] = [default_project]
+
     user_labels = list(user_names.keys())
     current_user_name = st.session_state.get("user", {}).get("name")
-    user_index = user_labels.index(current_user_name) if current_user_name in user_labels else 0
-    selected_user = c1.selectbox("Utilisateur", user_labels, index=user_index)
+    user_selector_key = f"{key_prefix}_user_name"
+    if st.session_state.get(user_selector_key) not in user_labels:
+        st.session_state[user_selector_key] = current_user_name if current_user_name in user_labels else user_labels[0]
+
+    project_col, user_col = st.columns([3, 2], vertical_alignment="bottom")
+    selected_project_labels = project_col.multiselect("Projets", project_label_list, key=project_selector_key)
+    selected_user = user_col.selectbox("Utilisateur", user_labels, key=user_selector_key)
     user_id = user_names[selected_user]
 
-    week_key = f"timesheet_week_{project_id}"
+    if not selected_project_labels:
+        st.warning("Sélectionnez au moins un projet pour afficher la grille.")
+        return
+
+    selected_project_ids = [project_labels[label] for label in selected_project_labels]
+    st.session_state["selected_project_id"] = selected_project_ids[0]
+    project_key = "_".join(str(project_id) for project_id in selected_project_ids)
+
+    week_prev_col, week_date_col, week_next_col = st.columns([1, 3, 1], vertical_alignment="bottom")
+    week_key = f"{key_prefix}_week"
     if week_key not in st.session_state:
         st.session_state[week_key] = week_start(date.today())
-    if c2.button("←", key=f"{week_key}_previous", use_container_width=True):
+    if week_prev_col.button("←", key=f"{week_key}_previous", use_container_width=True):
         st.session_state[week_key] = week_start(st.session_state[week_key]) - timedelta(days=7)
         st.rerun()
-    selected_day = c3.date_input("Semaine", key=week_key)
-    if c4.button("→", key=f"{week_key}_next", use_container_width=True):
+    if week_next_col.button("→", key=f"{week_key}_next", use_container_width=True):
         st.session_state[week_key] = week_start(st.session_state[week_key]) + timedelta(days=7)
         st.rerun()
+    selected_day = week_date_col.date_input("Semaine", key=week_key)
 
     selected_week = week_start(selected_day)
     iso_year, iso_week, _ = selected_week.isocalendar()
     week_end = selected_week + timedelta(days=6)
     st.subheader(f"Semaine {iso_week}/{iso_year}")
-    st.caption(f"Du {selected_week:%d/%m/%Y} au {week_end:%d/%m/%Y}. Les tâches agrégées sont exclues du pointage.")
+    caption = (
+        f"Du {selected_week:%d/%m/%Y} au {week_end:%d/%m/%Y}. "
+        "Les tâches agrégées sont visibles en gris et verrouillées à la saisie."
+    )
+    if caption_extra:
+        caption = f"{caption} {caption_extra}"
+    st.caption(caption)
 
     with session_scope() as session:
-        weekly_data = weekly_timesheet_df(session, project_id, user_id, selected_week)
-        entries = time_entries_df(session, project_id)
+        weekly_frames = []
+        entry_frames = []
+        for project_label, project_id in zip(selected_project_labels, selected_project_ids, strict=False):
+            project_week = weekly_df_func(session, project_id, user_id, selected_week)
+            if not project_week.empty:
+                project_week = project_week.copy()
+                project_week.insert(0, "Projet ID", project_id)
+                project_week.insert(1, "Projet", project_label)
+                weekly_frames.append(project_week)
+            project_entries = entries_df_func(session, project_id)
+            if not project_entries.empty:
+                entry_frames.append(project_entries)
+        weekly_data = pd.concat(weekly_frames, ignore_index=True) if weekly_frames else pd.DataFrame()
+        entries = pd.concat(entry_frames, ignore_index=True) if entry_frames else pd.DataFrame()
 
     day_columns = [label for _, label in week_day_columns(selected_week)]
     if weekly_data.empty:
-        st.info("Aucune tâche directe disponible pour ce projet.")
+        st.info(empty_grid_message)
     else:
-        editor_data = weekly_data.set_index("Tâche ID")
-        column_config = {
-            "Tâche": st.column_config.TextColumn("Tâche", disabled=True, width="large"),
-        }
-        for label in day_columns:
-            column_config[label] = st.column_config.NumberColumn(label, min_value=0.0, max_value=24.0, step=0.25)
-
-        edited_week = st.data_editor(
-            editor_data,
-            key=f"weekly_timesheet_{project_id}_{user_id}_{selected_week:%Y%m%d}",
-            use_container_width=True,
-            hide_index=True,
-            column_order=["Tâche"] + day_columns,
-            disabled=["Tâche"],
-            column_config=column_config,
+        save_week = top_right_save_button(f"{key_prefix}_save_week")
+        edited_week = weekly_timesheet_editor(
+            weekly_data,
+            day_columns,
+            project_key,
+            user_id,
+            selected_week,
+            grid_key_prefix=f"weekly_{key_prefix}",
+            user_label=selected_user,
         )
-
-        daily_totals = edited_week[day_columns].apply(pd.to_numeric, errors="coerce").fillna(0).sum()
+        editable_rows = (
+            edited_week["_time_editable"].astype(str).str.lower().isin(["true", "1", "yes"])
+            if "_time_editable" in edited_week.columns
+            else pd.Series(True, index=edited_week.index)
+        )
+        direct_week = edited_week[editable_rows]
+        daily_totals = direct_week[day_columns].apply(pd.to_numeric, errors="coerce").fillna(0).sum()
         total_hours = float(daily_totals.sum())
         st.caption("Total semaine : " + f"{total_hours:.2f} h")
         st.dataframe(
@@ -1122,46 +1744,208 @@ def show_timesheet() -> None:
             hide_index=True,
         )
 
-        if st.button("Enregistrer la semaine", type="primary"):
+        if save_week:
             try:
                 with session_scope() as session:
-                    save_weekly_timesheet(session, project_id, user_id, selected_week, edited_week.reset_index())
-                st.success("Pointages hebdomadaires enregistrés, tâches et budgets recalculés.")
+                    project_id_values = pd.to_numeric(edited_week["Projet ID"], errors="coerce")
+                    for project_id in selected_project_ids:
+                        project_week = edited_week[project_id_values == project_id]
+                        if not project_week.empty:
+                            save_weekly_func(session, project_id, user_id, selected_week, project_week)
+                st.success(save_success)
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
 
     st.divider()
-    st.subheader("Historique des pointages")
+    st.subheader(history_title)
     user_entries = entries[entries["Utilisateur"] == selected_user].copy() if not entries.empty else entries
     if user_entries.empty:
-        st.info("Aucun pointage pour cet utilisateur sur ce projet.")
+        st.info(empty_history_message)
         return
 
     with session_scope() as session:
-        task_labels = direct_task_options(session, project_id)
+        task_labels = {}
+        for project_id in selected_project_ids:
+            task_labels.update(direct_task_options(session, project_id))
+
+    disabled_columns = ["ID", "Projet", "Utilisateur"] + [
+        column for column in ["Taux", "Coût"] if column in user_entries.columns
+    ]
+    save_history = top_right_save_button(f"{key_prefix}_save_history", button_type="secondary")
     edited_entries = st.data_editor(
         user_entries,
-        key=f"time_history_editor_{project_id}_{user_id}",
+        key=f"{key_prefix}_history_editor_{project_key}_{user_id}",
         use_container_width=True,
         hide_index=True,
-        disabled=["ID", "Projet", "Utilisateur", "Taux", "Coût"],
+        disabled=disabled_columns,
         column_config={
             "Date": st.column_config.DateColumn("Date"),
             "Tâche": st.column_config.SelectboxColumn("Tâche", options=list(task_labels.keys())),
             "Heures": st.column_config.NumberColumn("Heures", min_value=0.0, max_value=24.0, step=0.25),
         },
     )
-    if st.button("Enregistrer les corrections de l'historique", type="secondary"):
+    if save_history:
         try:
             with session_scope() as session:
-                update_time_entries_from_df(session, edited_entries, project_id)
-            st.success("Pointages mis à jour, tâches et budgets recalculés.")
+                update_entries_func(session, edited_entries, None)
+            st.success(update_success)
             st.rerun()
         except Exception as exc:
             st.error(str(exc))
 
-    delete_record_control("time_entry", user_entries, ["Date", "Tâche", "Utilisateur"], f"time_entries_{project_id}_{user_id}")
+    delete_record_control(
+        delete_entity,
+        user_entries,
+        ["Date", "Tâche", "Utilisateur"],
+        f"{key_prefix}_entries_{project_key}_{user_id}",
+    )
+
+
+def show_time_recap(
+    title: str,
+    key_prefix: str,
+    entries_df_func,
+    default_start: date,
+    empty_message: str,
+) -> None:
+    st.subheader(title)
+    selected_day = st.date_input("Date de démarrage", value=default_start, key=f"{key_prefix}_recap_start")
+    selected_start = week_start(selected_day)
+    selected_end = selected_start + timedelta(days=27)
+    if selected_start != selected_day:
+        st.caption(f"La date est alignée sur le lundi de la semaine : {selected_start:%d/%m/%Y}.")
+    st.caption(f"Période affichée : du {selected_start:%d/%m/%Y} au {selected_end:%d/%m/%Y}.")
+
+    with session_scope() as session:
+        entries = entries_df_func(session, None)
+
+    period_entries = entries.copy()
+    if not period_entries.empty:
+        period_entries["Date"] = pd.to_datetime(period_entries["Date"], errors="coerce").dt.date
+        period_entries["Heures"] = pd.to_numeric(period_entries["Heures"], errors="coerce").fillna(0)
+        period_entries = period_entries[
+            period_entries["Date"].notna()
+            & (period_entries["Date"] >= selected_start)
+            & (period_entries["Date"] <= selected_end)
+            & (period_entries["Heures"] > 0)
+        ].copy()
+
+    user_filter_options = (
+        sorted(period_entries["Utilisateur"].dropna().astype(str).unique().tolist())
+        if not period_entries.empty and "Utilisateur" in period_entries.columns
+        else []
+    )
+    project_filter_options = (
+        sorted(period_entries["Projet"].dropna().astype(str).unique().tolist())
+        if not period_entries.empty and "Projet" in period_entries.columns
+        else []
+    )
+    user_key = f"{key_prefix}_recap_users_{selected_start:%Y%m%d}"
+    project_key = f"{key_prefix}_recap_projects_{selected_start:%Y%m%d}"
+    if user_key not in st.session_state:
+        st.session_state[user_key] = user_filter_options
+    else:
+        st.session_state[user_key] = [value for value in st.session_state[user_key] if value in user_filter_options]
+    if project_key not in st.session_state:
+        st.session_state[project_key] = project_filter_options
+    else:
+        st.session_state[project_key] = [value for value in st.session_state[project_key] if value in project_filter_options]
+
+    filter_user_col, filter_project_col = st.columns(2)
+    selected_users = filter_user_col.multiselect(
+        "Utilisateurs",
+        user_filter_options,
+        key=user_key,
+        placeholder="Sélectionner un ou plusieurs utilisateurs",
+    )
+    selected_projects = filter_project_col.multiselect(
+        "Projets",
+        project_filter_options,
+        key=project_key,
+        placeholder="Sélectionner un ou plusieurs projets",
+    )
+
+    filtered_entries = period_entries.copy()
+    if selected_users:
+        filtered_entries = filtered_entries[filtered_entries["Utilisateur"].isin(selected_users)]
+    else:
+        filtered_entries = filtered_entries.iloc[0:0]
+    if selected_projects:
+        filtered_entries = filtered_entries[filtered_entries["Projet"].isin(selected_projects)]
+    else:
+        filtered_entries = filtered_entries.iloc[0:0]
+
+    recap_data, day_specs = time_recap_table_data(filtered_entries, selected_start)
+    day_fields = [str(spec["field"]) for spec in day_specs]
+    total_hours = float(recap_data[day_fields].sum().sum()) if not recap_data.empty else 0.0
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Utilisateurs", recap_data["Utilisateur"].nunique() if not recap_data.empty else 0)
+    c2.metric("Tâches", recap_data["Tâche"].nunique() if not recap_data.empty else 0)
+    c3.metric("Heures", f"{total_hours:.2f} h")
+    if recap_data.empty:
+        st.info(empty_message)
+        return
+    time_recap_grid(recap_data, day_specs, key=f"{key_prefix}_recap_grid_{selected_start:%Y%m%d}")
+
+
+def show_timesheet() -> None:
+    st.title("Timesheet")
+    entry_tab, recap_tab = st.tabs(["Saisie Timesheet", "Récap. Timesheet"])
+    with entry_tab:
+        show_weekly_time_capture(
+            title="Saisie hebdomadaire",
+            key_prefix="timesheet",
+            weekly_df_func=weekly_timesheet_df,
+            entries_df_func=time_entries_df,
+            save_weekly_func=save_weekly_timesheet,
+            update_entries_func=update_time_entries_from_df,
+            delete_entity="time_entry",
+            history_title="Historique des pointages",
+            empty_grid_message="Aucune tâche disponible pour les projets sélectionnés.",
+            empty_history_message="Aucun pointage pour cet utilisateur sur les projets sélectionnés.",
+            save_success="Pointages hebdomadaires enregistrés, tâches et budgets recalculés.",
+            update_success="Pointages mis à jour, tâches et budgets recalculés.",
+            title_level="subheader",
+        )
+    with recap_tab:
+        show_time_recap(
+            title="Récap. Timesheet",
+            key_prefix="timesheet",
+            entries_df_func=time_entries_df,
+            default_start=week_start(date.today()) - timedelta(weeks=3),
+            empty_message="Aucun pointage sur les 4 semaines affichées.",
+        )
+
+
+def show_planning() -> None:
+    st.title("Planification")
+    entry_tab, recap_tab = st.tabs(["Saisie Planification", "Récap. Planification"])
+    with entry_tab:
+        show_weekly_time_capture(
+            title="Saisie hebdomadaire",
+            key_prefix="planning",
+            weekly_df_func=weekly_planning_df,
+            entries_df_func=planned_time_entries_df,
+            save_weekly_func=save_weekly_planning,
+            update_entries_func=update_planned_time_entries_from_df,
+            delete_entity="planned_time_entry",
+            history_title="Historique de planification",
+            empty_grid_message="Aucune tâche disponible pour les projets sélectionnés.",
+            empty_history_message="Aucune planification pour cet utilisateur sur les projets sélectionnés.",
+            save_success="Planification hebdomadaire enregistrée. Le temps planifié futur des tâches est à jour.",
+            update_success="Planification mise à jour. Le temps planifié futur des tâches est à jour.",
+            caption_extra="Seules les dates à partir d'aujourd'hui alimentent le champ Temps planifié des tâches.",
+            title_level="subheader",
+        )
+    with recap_tab:
+        show_time_recap(
+            title="Récap. Planification",
+            key_prefix="planning",
+            entries_df_func=planned_time_entries_df,
+            default_start=week_start(date.today()),
+            empty_message="Aucune planification sur les 4 semaines affichées.",
+        )
 
 
 def legacy_show_budget_lines() -> None:
@@ -1197,6 +1981,7 @@ def legacy_show_budget_lines() -> None:
         c4.metric("Engagé", eur(totals["Engagé"]))
         c5.metric("Réel", eur(totals["Réel"]))
         c6.metric("Reste", eur(totals["Reste"]))
+    save_legacy_budget = top_right_save_button(f"legacy_budget_save_{project_id}")
     edited_budget = st.data_editor(
         data,
         key=f"budget_editor_{project_id}",
@@ -1223,7 +2008,7 @@ def legacy_show_budget_lines() -> None:
             "Engagé": st.column_config.NumberColumn("Engagé", min_value=0.0, step=100.0),
         },
     )
-    if st.button("Enregistrer les modifications budget", type="primary"):
+    if save_legacy_budget:
         try:
             with session_scope() as session:
                 update_budget_from_df(session, edited_budget)
@@ -1273,6 +2058,7 @@ def show_budget() -> None:
         c5.plotly_chart(budget_pie(data), use_container_width=True)
 
         st.subheader("Budgets")
+        save_budget = top_right_save_button(f"budget_header_save_{project_id}")
         display_columns = [
             "ID",
             "Projet ID",
@@ -1309,7 +2095,7 @@ def show_budget() -> None:
                 "Reste": st.column_config.NumberColumn("Reste", format="%.2f €"),
             },
         )
-        if st.button("Enregistrer les budgets", type="primary"):
+        if save_budget:
             try:
                 with session_scope() as session:
                     update_budget_from_df(session, edited_budget)
@@ -1343,6 +2129,7 @@ def show_budget() -> None:
         st.info("Aucune ligne de frais pour ce projet.")
         return
 
+    save_lines = top_right_save_button(f"budget_line_save_{project_id}")
     edited_lines = st.data_editor(
         lines,
         key=f"budget_line_editor_{project_id}",
@@ -1357,7 +2144,7 @@ def show_budget() -> None:
             "Prévu": st.column_config.NumberColumn("Prévu", min_value=0.0, step=100.0, format="%.2f €"),
         },
     )
-    if st.button("Enregistrer les lignes de frais", type="primary"):
+    if save_lines:
         try:
             with session_scope() as session:
                 update_budget_lines_from_df(session, edited_lines, project_id)
@@ -1414,25 +2201,51 @@ def show_users() -> None:
         if submitted:
             try:
                 with session_scope() as session:
-                    create_user(session, username, full_name, email, role, password, rate)
-                st.success("Utilisateur créé.")
+                    user = create_user(session, username, full_name, email, role, password, rate)
+                    project = ensure_user_project(session, user.id)
+                st.success(f"Utilisateur créé avec son projet personnel : {project.code}.")
                 st.rerun()
             except IntegrityError:
                 st.error("Cet identifiant existe déjà.")
 
+    st.subheader("Projets utilisateur et support")
+    user_project_options = {
+        f"{row['Nom']} ({row['Utilisateur']})": int(row["ID"])
+        for row in data.to_dict("records")
+    }
+    c1, c2, c3 = st.columns([3, 2, 2], vertical_alignment="bottom")
+    selected_project_user = c1.selectbox("Utilisateur", list(user_project_options.keys()) if user_project_options else [""])
+    if c2.button("Créer le projet utilisateur", use_container_width=True, disabled=not user_project_options):
+        try:
+            with session_scope() as session:
+                project = ensure_user_project(session, user_project_options[selected_project_user])
+            st.success(f"Projet utilisateur disponible : {project.code}.")
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+    if c3.button("Créer le projet SUPPORT", use_container_width=True):
+        try:
+            with session_scope() as session:
+                project = ensure_support_project(session)
+            st.success(f"Projet support disponible : {project.code}.")
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+
+    save_users = top_right_save_button("users_save")
     edited_users = st.data_editor(
         data,
         key="users_editor",
         use_container_width=True,
         hide_index=True,
-        disabled=["ID"],
+        disabled=["ID", "Projet utilisateur"],
         column_config={
             "Rôle": st.column_config.SelectboxColumn("Rôle", options=["member", "manager", "admin"]),
             "Taux horaire": st.column_config.NumberColumn("Taux horaire", min_value=0.0, step=5.0),
             "Actif": st.column_config.CheckboxColumn("Actif"),
         },
     )
-    if st.button("Enregistrer les modifications utilisateurs", type="primary"):
+    if save_users:
         try:
             with session_scope() as session:
                 update_users_from_df(session, edited_users)
@@ -1466,6 +2279,8 @@ def main() -> None:
         show_tasks()
     elif page == "Timesheet":
         show_timesheet()
+    elif page == "Planification":
+        show_planning()
     elif page == "Budget":
         show_budget()
     elif page == "Rapports PDF":

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import html
-from datetime import timedelta
+from datetime import date, timedelta
 
 import networkx as nx
 import pandas as pd
@@ -28,6 +28,27 @@ PROJECT_STATUS_COLORS = {
 
 GANTT_ROW_HEIGHT_PX = 30
 GANTT_VERTICAL_CHROME_PX = 105
+TODAY_BAND_COLOR = "rgba(251, 146, 60, 0.22)"
+TODAY_BAND_LINE = "rgba(249, 115, 22, 0.65)"
+
+
+def add_today_band(fig: go.Figure, start_value: object, end_value: object) -> None:
+    start = pd.to_datetime(start_value, errors="coerce")
+    end = pd.to_datetime(end_value, errors="coerce")
+    if pd.isna(start) or pd.isna(end):
+        return
+    today_start = pd.Timestamp(date.today())
+    today_end = today_start + pd.Timedelta(days=1)
+    if today_end < start or today_start > end:
+        return
+    fig.add_vrect(
+        x0=today_start,
+        x1=today_end,
+        fillcolor=TODAY_BAND_COLOR,
+        line_color=TODAY_BAND_LINE,
+        line_width=1,
+        layer="below",
+    )
 
 
 def task_level_label(label: object, level: object) -> str:
@@ -120,6 +141,7 @@ def projects_gantt(projects: pd.DataFrame, color_field: str = "Budget") -> go.Fi
         ),
         rangeslider=dict(visible=True, thickness=0.08),
     )
+    add_today_band(fig, df["Début"].min(), df["Fin affichée"].max())
     fig.update_layout(
         height=max(170, min(760, GANTT_VERTICAL_CHROME_PX + len(df) * GANTT_ROW_HEIGHT_PX)),
         margin=dict(l=12, r=12, t=70, b=20),
@@ -162,6 +184,7 @@ def gantt_figure(tasks: pd.DataFrame, color_field: str = "Temps prévu") -> go.F
             "Mode calcul",
             "Temps prévu",
             "Temps passé",
+            "Temps planifié",
             "Coût prévu",
             "Coût réel total",
             "Progression",
@@ -209,6 +232,7 @@ def gantt_figure(tasks: pd.DataFrame, color_field: str = "Temps prévu") -> go.F
         rangeslider=dict(visible=True, thickness=0.08),
         domain=[0.28, 1],
     )
+    add_today_band(fig, df["Début"].min(), df["Fin affichée"].max())
     for row in df.to_dict("records"):
         fig.add_annotation(
             xref="paper",
@@ -316,11 +340,12 @@ def workload_bar(tasks: pd.DataFrame) -> go.Figure:
         tasks = tasks[tasks["Mode calcul"] == "Direct"].copy()
         if tasks.empty:
             return empty_figure("Aucune tâche de détail")
-    grouped = tasks.groupby("Ressources", as_index=False)[["Temps prévu", "Temps passé"]].sum()
+    hour_columns = [column for column in ["Temps prévu", "Temps planifié", "Temps passé"] if column in tasks.columns]
+    grouped = tasks.groupby("Ressources", as_index=False)[hour_columns].sum()
     grouped = grouped[grouped["Ressources"].astype(str).str.len() > 0]
     if grouped.empty:
         return empty_figure("Aucune ressource affectée")
-    fig = px.bar(grouped, x="Ressources", y=["Temps prévu", "Temps passé"], barmode="group")
+    fig = px.bar(grouped, x="Ressources", y=hour_columns, barmode="group")
     fig.update_layout(height=320, margin=dict(l=20, r=20, t=25, b=20), legend_title_text="")
     return fig
 
