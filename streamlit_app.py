@@ -47,6 +47,7 @@ from perspectiv.services import (
     direct_task_options,
     ensure_support_project,
     ensure_user_project,
+    get_grid_visible_columns,
     get_project,
     kpis,
     monthly_completion_df,
@@ -59,6 +60,7 @@ from perspectiv.services import (
     time_entries_df,
     save_weekly_planning,
     save_weekly_timesheet,
+    save_grid_visible_columns,
     update_budget_from_df,
     update_budget_lines_from_df,
     update_projects_from_df,
@@ -287,15 +289,22 @@ def styled_plain_table(data: pd.DataFrame):
     )
 
 
-def styled_task_table(data: pd.DataFrame):
-    columns = [column for column in TASK_DISPLAY_COLUMNS if column in data.columns]
+def styled_task_table(data: pd.DataFrame, visible_columns: list[str] | None = None):
+    allowed_columns = set(visible_columns) if visible_columns is not None else None
+    columns = [
+        column
+        for column in TASK_DISPLAY_COLUMNS
+        if column in data.columns and (allowed_columns is None or column in allowed_columns)
+    ]
     display = data[columns].copy()
+    source_levels = data["Niveau"] if "Niveau" in data.columns else None
 
     def row_style(row: pd.Series) -> list[str]:
-        color = level_color(row.get("Niveau"))
-        text_style = level_text_style(row.get("Niveau"))
+        level_value = source_levels.loc[row.name] if source_levels is not None and row.name in source_levels.index else row.get("Niveau")
+        color = level_color(level_value)
+        text_style = level_text_style(level_value)
         try:
-            level = int(row.get("Niveau") or 0)
+            level = int(level_value or 0)
         except (TypeError, ValueError):
             level = 0
         separator = "border-top: 1px solid #d1d5db;" if level == 1 else ""
@@ -373,6 +382,101 @@ def aggrid_data(response: object, fallback: pd.DataFrame) -> pd.DataFrame:
     if isinstance(data, list):
         return pd.DataFrame(data)
     return fallback
+
+
+TECHNICAL_GRID_COLUMNS = {"ID", "Projet ID", "Tâche ID", "Budget ID", "_time_editable"}
+
+
+def ordered_unique(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(str(value) for value in values))
+
+
+def grid_column_visibility_selector(
+    grid_key: str,
+    columns: list[str],
+    *,
+    required_columns: list[str] | None = None,
+    default_columns: list[str] | None = None,
+    technical_columns: set[str] | None = None,
+    column_labels: dict[str, str] | None = None,
+) -> list[str]:
+    labels = column_labels or {}
+    all_columns = ordered_unique([column for column in columns if column])
+    technical = technical_columns or TECHNICAL_GRID_COLUMNS
+    valid_columns = [column for column in all_columns if column not in technical]
+    required = [column for column in ordered_unique(required_columns or []) if column in valid_columns]
+    default_visible = [
+        column
+        for column in (default_columns or valid_columns)
+        if column in valid_columns
+    ]
+    if not default_visible:
+        default_visible = valid_columns
+    default_visible = [column for column in valid_columns if column in set(required + default_visible)]
+    selectable_columns = [column for column in valid_columns if column not in set(required)]
+    if not selectable_columns:
+        return [column for column in valid_columns if column in set(required or default_visible)]
+
+    user_id = int(st.session_state["user"]["id"])
+    with session_scope() as session:
+        stored_visible = get_grid_visible_columns(session, user_id, grid_key, default_visible, valid_columns)
+    stored_set = set(required + stored_visible)
+    selected_defaults = [column for column in selectable_columns if column in stored_set]
+    widget_key = f"{grid_key}_visible_columns"
+    selector_col, reset_col = st.columns([5, 1], vertical_alignment="bottom")
+    if reset_col.button("Réinitialiser", key=f"{grid_key}_reset_columns", use_container_width=True):
+        with session_scope() as session:
+            save_grid_visible_columns(session, user_id, grid_key, default_visible)
+        st.session_state.pop(widget_key, None)
+        st.rerun()
+    if widget_key not in st.session_state:
+        st.session_state[widget_key] = selected_defaults
+    else:
+        st.session_state[widget_key] = [
+            column for column in st.session_state[widget_key] if column in selectable_columns
+        ]
+    selected_optional = selector_col.multiselect(
+        "Colonnes affichées",
+        selectable_columns,
+        key=widget_key,
+        format_func=lambda column: labels.get(column, column),
+    )
+    required_labels = ", ".join(labels.get(column, column) for column in required)
+    if required_labels:
+        selector_col.caption(f"Toujours visibles : {required_labels}")
+    selected_set = set(required + selected_optional)
+    visible_columns = [column for column in valid_columns if column in selected_set]
+    if set(visible_columns) != set(stored_visible):
+        with session_scope() as session:
+            save_grid_visible_columns(session, user_id, grid_key, visible_columns)
+    return visible_columns
+
+
+def apply_aggrid_column_visibility(
+    column_defs: list[dict],
+    visible_columns: list[str],
+    *,
+    required_columns: list[str] | None = None,
+    technical_columns: set[str] | None = None,
+) -> list[dict]:
+    visible_set = set(visible_columns) | set(required_columns or [])
+    technical = technical_columns or TECHNICAL_GRID_COLUMNS
+    updated_defs = []
+    for column_def in column_defs:
+        updated = dict(column_def)
+        field = updated.get("field")
+        if field:
+            if field in technical or field not in visible_set:
+                updated["hide"] = True
+            else:
+                updated.pop("hide", None)
+        updated_defs.append(updated)
+    return updated_defs
+
+
+def visible_columns_for_editor(data: pd.DataFrame, visible_columns: list[str]) -> list[str]:
+    visible_set = set(visible_columns)
+    return [column for column in data.columns if column in visible_set]
 
 
 def compact_grid_height(
@@ -523,8 +627,9 @@ def project_grid_data(data: pd.DataFrame) -> pd.DataFrame:
     return grid_data
 
 
-def project_grid(data: pd.DataFrame, user_names: dict[str, int]):
+def project_grid(data: pd.DataFrame, user_names: dict[str, int], key: str = "projects_grid"):
     grid_data = project_grid_data(data)
+    technical_columns = {"ID"}
     column_defs = [
         {"field": "ID", "hide": True, "editable": False},
         {"field": "Code", "pinned": "left", "editable": True, "width": 110},
@@ -564,6 +669,18 @@ def project_grid(data: pd.DataFrame, user_names: dict[str, int]):
         {"field": "Budget heures", "editable": True, "type": "numericColumn", "width": 145},
         {"field": "Description", "editable": True, "width": 220},
     ]
+    visible_columns = grid_column_visibility_selector(
+        "projects_grid",
+        [column["field"] for column in column_defs if column.get("field")],
+        required_columns=["Code", "Projet"],
+        technical_columns=technical_columns,
+    )
+    column_defs = apply_aggrid_column_visibility(
+        column_defs,
+        visible_columns,
+        required_columns=["Code", "Projet"],
+        technical_columns=technical_columns,
+    )
     grid_options = {
         "columnDefs": column_defs,
         "defaultColDef": {
@@ -596,7 +713,7 @@ def project_grid(data: pd.DataFrame, user_names: dict[str, int]):
         show_search=True,
         show_download_button=False,
         custom_css=TODAY_AGGRID_CSS,
-        key="projects_grid",
+        key=key,
     )
 
 
@@ -740,8 +857,22 @@ def task_editor(
         {"field": "Ressources", "editable": False, "width": 180},
         {"field": "Description", "editable": True, "width": 260},
     ]
+    available_column_defs = [col for col in column_defs if col["field"] in grid_data.columns]
+    visible_columns = grid_column_visibility_selector(
+        "tasks_grid",
+        [column["field"] for column in available_column_defs if column.get("field")],
+        required_columns=["Libellé", "Référence"],
+        technical_columns={"ID", "Projet ID", "Projet"},
+        column_labels={"Libellé": "Tâche"},
+    )
+    column_defs = apply_aggrid_column_visibility(
+        available_column_defs,
+        visible_columns,
+        required_columns=["Libellé", "Référence"],
+        technical_columns={"ID", "Projet ID", "Projet"},
+    )
     grid_options = {
-        "columnDefs": [col for col in column_defs if col["field"] in grid_data.columns],
+        "columnDefs": column_defs,
         "defaultColDef": {
             "filter": True,
             "sortable": True,
@@ -970,6 +1101,19 @@ def weekly_timesheet_editor(
             }
         )
     column_defs.append({"headerName": week_label, "headerClass": "pv-center-header week-group-header", "children": day_children})
+    visible_columns = grid_column_visibility_selector(
+        f"{grid_key_prefix}_grid",
+        [column["field"] for column in column_defs if column.get("field")],
+        required_columns=["Projet", "Tâche"],
+        default_columns=["Projet", "Tâche", "Mode calcul"],
+        technical_columns={"Projet ID", "Tâche ID", "_time_editable"},
+    )
+    column_defs = apply_aggrid_column_visibility(
+        column_defs,
+        visible_columns,
+        required_columns=["Projet", "Tâche"],
+        technical_columns={"Projet ID", "Tâche ID", "_time_editable"},
+    )
     grid_options = {
         "columnDefs": column_defs,
         "defaultColDef": {
@@ -1217,7 +1361,13 @@ def show_grouped_tasks(task_data: pd.DataFrame) -> None:
         st.info("Aucune tâche disponible.")
         return
     task_level_legend()
-    st.dataframe(styled_task_table(task_data), use_container_width=True, hide_index=True)
+    visible_columns = grid_column_visibility_selector(
+        "grouped_tasks_grid",
+        [column for column in TASK_DISPLAY_COLUMNS if column in task_data.columns],
+        required_columns=["Libellé"],
+        column_labels={"Libellé": "Tâche"},
+    )
+    st.dataframe(styled_task_table(task_data, visible_columns), use_container_width=True, hide_index=True)
 
     roots, children_by_parent = task_tree(task_data)
     st.subheader("Regroupement par tâche maîtresse")
@@ -1231,7 +1381,7 @@ def show_grouped_tasks(task_data: pd.DataFrame) -> None:
             c2.metric("Heures", f"{float(root.get('Temps passé') or 0):.1f} / {float(root.get('Temps prévu') or 0):.1f}")
             c3.metric("Coût réel", eur(float(root.get("Coût réel total") or 0)))
             c4.metric("Avancement", f"{float(root.get('Avancement') or 0):.0f}%")
-            st.dataframe(styled_task_table(pd.DataFrame(subtree)), use_container_width=True, hide_index=True)
+            st.dataframe(styled_task_table(pd.DataFrame(subtree), visible_columns), use_container_width=True, hide_index=True)
 
 
 def inject_css() -> None:
@@ -1653,9 +1803,35 @@ def show_projects() -> None:
         st.info("Aucun projet disponible.")
         return
 
+    project_label_by_id = {
+        int(row["ID"]): f"{row.get('Code', '')} - {row.get('Projet', '')}"
+        for row in data.to_dict("records")
+        if row.get("ID")
+    }
+    project_ids_by_label = {label: project_id for project_id, label in project_label_by_id.items()}
+    project_label_list = [project_label_by_id[int(row["ID"])] for row in data.to_dict("records") if row.get("ID")]
+    default_project = project_label_by_id.get(int(st.session_state.get("selected_project_id") or 0))
+    default_selection = [default_project or project_label_list[0]]
+    selector_key = "projects_view_project_labels"
+    existing_projects = st.session_state.get(selector_key)
+    if isinstance(existing_projects, list):
+        valid_existing = [label for label in existing_projects if label in project_ids_by_label]
+        st.session_state[selector_key] = valid_existing or default_selection
+    else:
+        st.session_state[selector_key] = default_selection
+
+    selected_project_labels = st.multiselect("Projets", project_label_list, key=selector_key)
+    if not selected_project_labels:
+        st.warning("Sélectionnez au moins un projet pour afficher le Gantt et la grille.")
+        return
+    selected_project_ids = [project_ids_by_label[label] for label in selected_project_labels]
+    st.session_state["selected_project_id"] = selected_project_ids[0]
+    filtered_data = data[data["ID"].isin(selected_project_ids)].copy()
+    project_key = "_".join(str(project_id) for project_id in selected_project_ids)
+
     st.subheader("Gantt projets")
     st.caption("Modifiez les dates ou les montants : le Gantt se met à jour automatiquement. Double-cliquez une ligne pour ouvrir ses tâches.")
-    color_options = [column for column in ["Budget", "Budget heures"] if column in data.columns]
+    color_options = [column for column in ["Budget", "Budget heures"] if column in filtered_data.columns]
     color_field = st.selectbox("Colorer les projets par", color_options or ["Budget"], index=0)
 
     gantt_container = st.container()
@@ -1663,8 +1839,8 @@ def show_projects() -> None:
     save_projects = top_right_save_button("projects_save")
     table_container = st.container()
     with table_container:
-        grid_response = project_grid(data, user_names)
-        edited = aggrid_data(grid_response, data)
+        grid_response = project_grid(filtered_data, user_names, key=f"projects_grid_{project_key}")
+        edited = aggrid_data(grid_response, filtered_data)
         project_id = double_clicked_project_id(grid_response)
         if project_id:
             navigate_to_project_tasks(project_id)
@@ -1684,8 +1860,7 @@ def show_projects() -> None:
         except Exception as exc:
             st.error(str(exc))
 
-
-    delete_record_control("project", data, ["Code", "Projet"], "projects")
+    delete_record_control("project", filtered_data, ["Code", "Projet"], "projects")
 
 
 def show_tasks() -> None:
@@ -1717,8 +1892,14 @@ def show_tasks() -> None:
             st.plotly_chart(gantt_figure(edited_tasks, color_field), width="stretch")
         if not deps.empty:
             st.caption("Dépendances")
+            deps_display = deps[["Prédécesseur", "Successeur", "Type", "Décalage"]]
+            deps_visible_columns = grid_column_visibility_selector(
+                "task_gantt_dependencies_grid",
+                list(deps_display.columns),
+                required_columns=["Prédécesseur", "Successeur"],
+            )
             st.dataframe(
-                styled_plain_table(deps[["Prédécesseur", "Successeur", "Type", "Décalage"]]),
+                styled_plain_table(deps_display[visible_columns_for_editor(deps_display, deps_visible_columns)]),
                 width="stretch",
                 hide_index=True,
             )
@@ -1835,8 +2016,14 @@ def show_tasks() -> None:
         if deps.empty:
             st.info("Aucune dépendance.")
         else:
+            deps_display = deps[["Prédécesseur", "Successeur", "Type", "Décalage"]]
+            deps_visible_columns = grid_column_visibility_selector(
+                "task_dependencies_grid",
+                list(deps_display.columns),
+                required_columns=["Prédécesseur", "Successeur"],
+            )
             st.dataframe(
-                styled_plain_table(deps[["Prédécesseur", "Successeur", "Type", "Décalage"]]),
+                styled_plain_table(deps_display[visible_columns_for_editor(deps_display, deps_visible_columns)]),
                 width="stretch",
                 hide_index=True,
             )
@@ -1864,7 +2051,17 @@ def show_tasks() -> None:
         if assignments.empty:
             st.info("Aucune affectation.")
         else:
-            st.dataframe(styled_plain_table(assignments), width="stretch", hide_index=True)
+            assignments_visible_columns = grid_column_visibility_selector(
+                "assignments_grid",
+                list(assignments.columns),
+                required_columns=["Tâche", "Utilisateur"],
+                technical_columns={"ID", "Tâche ID", "Utilisateur ID"},
+            )
+            st.dataframe(
+                styled_plain_table(assignments[visible_columns_for_editor(assignments, assignments_visible_columns)]),
+                width="stretch",
+                hide_index=True,
+            )
             delete_record_control("assignment", assignments, ["Tâche", "Utilisateur"], f"assignments_{project_id}")
 
 
@@ -1906,11 +2103,18 @@ def legacy_show_timesheet() -> None:
 
     st.plotly_chart(hours_by_user_bar(entries), use_container_width=True)
     save_legacy_timesheet = top_right_save_button(f"legacy_timesheet_save_{project_id}")
+    legacy_time_visible_columns = grid_column_visibility_selector(
+        "legacy_timesheet_grid",
+        list(entries.columns),
+        required_columns=["Date", "Tâche", "Heures"],
+        technical_columns={"ID", "Projet ID", "Tâche ID", "Utilisateur ID"},
+    )
     edited_entries = st.data_editor(
         entries,
         key=f"time_editor_{project_id}",
         use_container_width=True,
         hide_index=True,
+        column_order=visible_columns_for_editor(entries, legacy_time_visible_columns),
         disabled=["ID", "Projet", "Taux", "Coût"],
         column_config={
             "Date": st.column_config.DateColumn("Date"),
@@ -2093,11 +2297,18 @@ def show_weekly_time_capture(
         column for column in ["Taux", "Coût"] if column in user_entries.columns
     ]
     save_history = top_right_save_button(f"{key_prefix}_save_history", button_type="secondary")
+    history_visible_columns = grid_column_visibility_selector(
+        f"{key_prefix}_history_grid",
+        list(user_entries.columns),
+        required_columns=["Date", "Tâche"],
+        technical_columns={"ID", "Projet ID", "Tâche ID", "Utilisateur ID"},
+    )
     edited_entries = st.data_editor(
         user_entries,
         key=f"{key_prefix}_history_editor_{project_key}_{user_id}",
         use_container_width=True,
         hide_index=True,
+        column_order=visible_columns_for_editor(user_entries, history_visible_columns),
         disabled=disabled_columns,
         column_config={
             "Date": st.column_config.DateColumn("Date"),
@@ -2302,11 +2513,18 @@ def legacy_show_budget_lines() -> None:
         c5.metric("Réel", eur(totals["Réel"]))
         c6.metric("Reste", eur(totals["Reste"]))
     save_legacy_budget = top_right_save_button(f"legacy_budget_save_{project_id}")
+    legacy_budget_visible_columns = grid_column_visibility_selector(
+        "legacy_budget_grid",
+        list(data.columns),
+        required_columns=["Catégorie", "Libellé"],
+        technical_columns={"ID", "Projet ID"},
+    )
     edited_budget = st.data_editor(
         data,
         key=f"budget_editor_{project_id}",
         use_container_width=True,
         hide_index=True,
+        column_order=visible_columns_for_editor(data, legacy_budget_visible_columns),
         disabled=[
             "ID",
             "Projet ID",
@@ -2392,11 +2610,19 @@ def show_budget() -> None:
             "Tâches",
             "Lignes de frais",
         ]
+        budget_editor_data = data[[column for column in display_columns if column in data.columns]]
+        budget_visible_columns = grid_column_visibility_selector(
+            "budget_header_grid",
+            list(budget_editor_data.columns),
+            required_columns=["Référence", "Budget"],
+            technical_columns={"ID", "Projet ID"},
+        )
         edited_budget = st.data_editor(
-            data[[column for column in display_columns if column in data.columns]],
+            budget_editor_data,
             key=f"budget_header_editor_{project_id}",
             use_container_width=True,
             hide_index=True,
+            column_order=visible_columns_for_editor(budget_editor_data, budget_visible_columns),
             disabled=[
                 "ID",
                 "Projet ID",
@@ -2450,11 +2676,18 @@ def show_budget() -> None:
         return
 
     save_lines = top_right_save_button(f"budget_line_save_{project_id}")
+    line_visible_columns = grid_column_visibility_selector(
+        "budget_lines_grid",
+        list(lines.columns),
+        required_columns=["Budget", "Libellé"],
+        technical_columns={"ID", "Projet ID", "Budget ID"},
+    )
     edited_lines = st.data_editor(
         lines,
         key=f"budget_line_editor_{project_id}",
         use_container_width=True,
         hide_index=True,
+        column_order=visible_columns_for_editor(lines, line_visible_columns),
         disabled=["ID", "Projet ID", "Budget ID", "Projet"],
         column_config={
             "Budget": st.column_config.SelectboxColumn("Budget", options=list(budget_labels.keys())),
@@ -2553,11 +2786,18 @@ def show_users() -> None:
             st.error(str(exc))
 
     save_users = top_right_save_button("users_save")
+    user_visible_columns = grid_column_visibility_selector(
+        "users_grid",
+        list(data.columns),
+        required_columns=["Utilisateur", "Nom"],
+        technical_columns={"ID"},
+    )
     edited_users = st.data_editor(
         data,
         key="users_editor",
         use_container_width=True,
         hide_index=True,
+        column_order=visible_columns_for_editor(data, user_visible_columns),
         disabled=["ID", "Projet utilisateur"],
         column_config={
             "Rôle": st.column_config.SelectboxColumn("Rôle", options=["member", "manager", "admin"]),

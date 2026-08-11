@@ -26,6 +26,21 @@ class User(Base):
     assignments: Mapped[list["TaskAssignment"]] = relationship(back_populates="user")
     time_entries: Mapped[list["TimeEntry"]] = relationship(back_populates="user")
     planned_time_entries: Mapped[list["PlannedTimeEntry"]] = relationship(back_populates="user")
+    grid_preferences: Mapped[list["UserGridPreference"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class UserGridPreference(Base):
+    __tablename__ = "user_grid_preferences"
+    __table_args__ = (UniqueConstraint("user_id", "grid_key", name="uq_user_grid_preference"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    grid_key: Mapped[str] = mapped_column(String(120), index=True)
+    visible_columns: Mapped[str] = mapped_column(Text, default="[]")
+
+    user: Mapped[User] = relationship(back_populates="grid_preferences")
 
 
 class Project(Base):

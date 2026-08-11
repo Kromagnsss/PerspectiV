@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from datetime import date, timedelta
@@ -12,7 +13,18 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .database import recompute_actuals
-from .models import Budget, BudgetLine, PlannedTimeEntry, Project, Task, TaskAssignment, TaskDependency, TimeEntry, User
+from .models import (
+    Budget,
+    BudgetLine,
+    PlannedTimeEntry,
+    Project,
+    Task,
+    TaskAssignment,
+    TaskDependency,
+    TimeEntry,
+    User,
+    UserGridPreference,
+)
 from .security import hash_password, verify_password
 
 
@@ -42,6 +54,50 @@ def project_options(session: Session) -> dict[str, int]:
 def user_name_options(session: Session) -> dict[str, int]:
     users = session.scalars(select(User).where(User.active.is_(True)).order_by(User.full_name)).all()
     return {u.full_name: u.id for u in users}
+
+
+def _filtered_columns(columns: list[str], valid_columns: list[str]) -> list[str]:
+    valid_set = set(valid_columns)
+    return [column for column in columns if column in valid_set]
+
+
+def get_grid_visible_columns(
+    session: Session,
+    user_id: int,
+    grid_key: str,
+    defaults: list[str],
+    valid_columns: list[str],
+) -> list[str]:
+    default_columns = _filtered_columns(defaults, valid_columns)
+    preference = session.scalar(
+        select(UserGridPreference).where(
+            UserGridPreference.user_id == user_id,
+            UserGridPreference.grid_key == grid_key,
+        )
+    )
+    if not preference:
+        return default_columns
+    try:
+        stored_columns = json.loads(preference.visible_columns or "[]")
+    except json.JSONDecodeError:
+        return default_columns
+    if not isinstance(stored_columns, list):
+        return default_columns
+    visible_columns = _filtered_columns([str(column) for column in stored_columns], valid_columns)
+    return visible_columns or default_columns
+
+
+def save_grid_visible_columns(session: Session, user_id: int, grid_key: str, visible_columns: list[str]) -> None:
+    preference = session.scalar(
+        select(UserGridPreference).where(
+            UserGridPreference.user_id == user_id,
+            UserGridPreference.grid_key == grid_key,
+        )
+    )
+    if not preference:
+        preference = UserGridPreference(user_id=user_id, grid_key=grid_key)
+        session.add(preference)
+    preference.visible_columns = json.dumps(list(dict.fromkeys(visible_columns)), ensure_ascii=False)
 
 
 def task_options(session: Session, project_id: int | None = None) -> dict[str, int]:
@@ -1533,6 +1589,9 @@ def deletion_preview(session: Session, entity: str, record_id: int) -> dict[str,
         planned_time_entries = (
             session.scalar(select(func.count(PlannedTimeEntry.id)).where(PlannedTimeEntry.user_id == user.id)) or 0
         )
+        grid_preferences = (
+            session.scalar(select(func.count(UserGridPreference.id)).where(UserGridPreference.user_id == user.id)) or 0
+        )
         return {
             "label": user.full_name,
             "impacts": [
@@ -1540,6 +1599,7 @@ def deletion_preview(session: Session, entity: str, record_id: int) -> dict[str,
                 f"{assignments} affectation(s) supprimée(s)",
                 f"{time_entries} pointage(s) supprimé(s)",
                 f"{planned_time_entries} planification(s) supprimée(s)",
+                f"{grid_preferences} préférence(s) d'affichage supprimée(s)",
             ],
         }
 
@@ -1655,6 +1715,7 @@ def delete_record(session: Session, entity: str, record_id: int) -> None:
         session.execute(delete(TaskAssignment).where(TaskAssignment.user_id == user.id))
         session.execute(delete(TimeEntry).where(TimeEntry.user_id == user.id))
         session.execute(delete(PlannedTimeEntry).where(PlannedTimeEntry.user_id == user.id))
+        session.execute(delete(UserGridPreference).where(UserGridPreference.user_id == user.id))
         session.delete(user)
         session.flush()
         recompute_actuals(session)
