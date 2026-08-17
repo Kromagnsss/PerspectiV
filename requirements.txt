@@ -6,3 +6,4 @@ SQLAlchemy>=2.0
 networkx>=3.3
 reportlab>=4.2
 Babel>=2.15
+playwright>=1.46

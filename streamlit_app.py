@@ -558,6 +558,36 @@ def top_right_save_button(key: str, button_type: str = "primary") -> bool:
     return button_col.button("Enregistrer", type=button_type, key=key, use_container_width=True)
 
 
+def sticky_header_title(title: str) -> None:
+    st.markdown(f'<div class="pv-sticky-title">{title}</div>', unsafe_allow_html=True)
+
+
+def sticky_page_header(key: str, title: str | None = None):
+    container = st.container(key=f"pv_sticky_header_{key}")
+    if title:
+        with container:
+            sticky_header_title(title)
+    st.markdown(
+        f'<div class="pv-sticky-spacer pv-sticky-header-spacer pv-sticky-header-spacer-{key}"></div>',
+        unsafe_allow_html=True,
+    )
+    return container
+
+
+def sticky_toolbar(key: str):
+    container = st.container(key=f"pv_sticky_toolbar_{key}")
+    st.markdown(
+        f'<div class="pv-sticky-spacer pv-sticky-toolbar-spacer pv-sticky-toolbar-spacer-{key}"></div>',
+        unsafe_allow_html=True,
+    )
+    return container
+
+
+def sticky_tabs(key: str, labels: list[str]):
+    with st.container(key=f"pv_sticky_tabs_{key}"):
+        return st.tabs(labels)
+
+
 def delete_record_control(
     entity: str,
     data: pd.DataFrame,
@@ -1422,6 +1452,179 @@ def inject_css() -> None:
         div[data-testid="stCaptionContainer"] {margin-top: -0.2rem;}
         div[data-testid="stExpander"] {margin-bottom: 0.25rem;}
         div[data-testid="stTabs"] [data-baseweb="tab-list"] {margin-bottom: 0.35rem;}
+        header[data-testid="stHeader"] {
+            background: transparent !important;
+            box-shadow: none !important;
+            z-index: 100 !important;
+        }
+        header[data-testid="stHeader"] [data-testid="stToolbar"],
+        header[data-testid="stHeader"] .stDeployButton,
+        header[data-testid="stHeader"] [data-testid="stDecoration"],
+        #MainMenu,
+        footer {
+            display: none !important;
+        }
+        [class*="st-key-pv_sticky_header_"] {
+            position: fixed !important;
+            top: 0.45rem;
+            left: 20rem;
+            right: 1.15rem;
+            width: calc(100vw - 21.15rem) !important;
+            box-sizing: border-box;
+            z-index: 2147483000;
+            min-height: 4rem;
+            background: rgba(255, 255, 255, 0.99);
+            border: 1px solid #bcd7ff;
+            border-left: 4px solid var(--pv-blue);
+            box-shadow: 0 12px 30px rgba(6, 23, 53, 0.13);
+            backdrop-filter: blur(10px);
+            margin: 0;
+            padding: 0.55rem 0.9rem 0.6rem;
+        }
+        .pv-sticky-spacer {
+            display: block;
+            width: 100%;
+            pointer-events: none;
+        }
+        .pv-sticky-header-spacer {
+            height: 5.55rem;
+        }
+        .pv-sticky-header-spacer-timesheet,
+        .pv-sticky-header-spacer-planning,
+        .pv-sticky-header-spacer-users {
+            height: 4.8rem;
+        }
+        .pv-sticky-title {
+            color: var(--pv-navy);
+            font-size: clamp(1.75rem, 2.35vw, 2.45rem);
+            font-weight: 800;
+            line-height: 1.1;
+            white-space: nowrap;
+            padding: 0.25rem 0 0.1rem;
+        }
+        [class*="st-key-pv_sticky_header_"] [data-testid="stVerticalBlock"],
+        [class*="st-key-pv_sticky_toolbar_"] [data-testid="stVerticalBlock"] {
+            gap: 0.1rem;
+        }
+        [class*="st-key-pv_sticky_header_"] [data-testid="stHorizontalBlock"],
+        [class*="st-key-pv_sticky_toolbar_"] [data-testid="stHorizontalBlock"] {
+            gap: 0.5rem;
+        }
+        [class*="st-key-pv_sticky_header_"] [data-testid="column"] {
+            min-width: 0 !important;
+        }
+        [class*="st-key-pv_sticky_header_"] label,
+        [class*="st-key-pv_sticky_toolbar_"] label {
+            color: #264665 !important;
+            font-weight: 650 !important;
+            margin-bottom: 0.08rem !important;
+            line-height: 1.1 !important;
+        }
+        [class*="st-key-pv_sticky_header_"] [data-baseweb="select"] > div,
+        [class*="st-key-pv_sticky_toolbar_"] [data-baseweb="select"] > div {
+            width: 100% !important;
+            min-width: 0 !important;
+            min-height: 2.45rem !important;
+            max-height: 2.45rem !important;
+            overflow: hidden !important;
+            flex-wrap: nowrap !important;
+        }
+        [class*="st-key-pv_sticky_header_"] [data-baseweb="select"] span,
+        [class*="st-key-pv_sticky_header_"] [data-baseweb="select"] input,
+        [class*="st-key-pv_sticky_header_"] [data-testid="stDateInput"] input {
+            min-width: 0 !important;
+            overflow: hidden !important;
+            text-overflow: ellipsis !important;
+            white-space: nowrap !important;
+        }
+        [class*="st-key-pv_sticky_header_"] button {
+            min-width: 2.1rem !important;
+            height: 2.45rem !important;
+            padding: 0 0.25rem !important;
+        }
+        [class*="st-key-pv_sticky_header_"] button p {
+            font-size: 1.1rem !important;
+            line-height: 1 !important;
+        }
+        div[data-baseweb="popover"],
+        div[data-baseweb="menu"],
+        div[role="listbox"] {
+            z-index: 2147483647 !important;
+        }
+        [class*="st-key-pv_sticky_tabs_"] [data-baseweb="tab-list"] {
+            position: static !important;
+            box-sizing: border-box;
+            background: rgba(255, 255, 255, 0.99);
+            border: 1px solid #d7e8ff;
+            border-radius: 7px;
+            box-shadow: 0 8px 20px rgba(6, 23, 53, 0.09);
+            padding: 0.22rem 0.45rem 0.32rem;
+            backdrop-filter: blur(10px);
+        }
+        [class*="st-key-pv_sticky_tabs_"] [data-baseweb="tab-panel"] {
+            padding-top: 0.25rem;
+        }
+        [class*="st-key-pv_sticky_toolbar_"] {
+            position: fixed !important;
+            left: 20rem;
+            right: 1.15rem;
+            width: calc(100vw - 21.15rem) !important;
+            box-sizing: border-box;
+            top: 8.05rem;
+            z-index: 2147482980;
+            min-height: 3.35rem;
+            background: rgba(255, 255, 255, 0.99);
+            border: 1px solid #bcd7ff;
+            border-radius: 8px;
+            box-shadow: 0 10px 22px rgba(6, 23, 53, 0.11);
+            backdrop-filter: blur(10px);
+            margin: 0 0 0.6rem;
+            padding: 0.45rem 0.7rem 0.5rem;
+        }
+        .st-key-pv_sticky_toolbar_tasks_gantt {
+            top: 8.05rem;
+        }
+        .pv-sticky-toolbar-spacer {
+            height: 4.7rem;
+        }
+        .pv-sticky-toolbar-spacer-tasks_gantt {
+            height: 4.7rem;
+        }
+        .pv-sticky-header-spacer-timesheet,
+        .pv-sticky-header-spacer-planning {
+            height: 6.35rem;
+        }
+        .pv-sticky-header-spacer-dashboard,
+        .pv-sticky-header-spacer-projects,
+        .pv-sticky-header-spacer-tasks,
+        .pv-sticky-header-spacer-budget,
+        .pv-sticky-header-spacer-reports {
+            height: 6.1rem;
+        }
+        @media (max-width: 900px) {
+            [class*="st-key-pv_sticky_header_"] {
+                left: 4.7rem;
+                right: 0.6rem;
+                width: calc(100vw - 5.3rem) !important;
+                margin-left: 0;
+                margin-right: 0;
+                padding-left: 0.4rem;
+                padding-right: 0.4rem;
+            }
+            .pv-sticky-header-spacer-timesheet,
+            .pv-sticky-header-spacer-planning {
+                height: 11rem;
+            }
+            [class*="st-key-pv_sticky_toolbar_"] {
+                left: 4.7rem;
+                right: 0.6rem;
+                width: calc(100vw - 5.3rem) !important;
+                top: 7.95rem;
+            }
+            .st-key-pv_sticky_toolbar_tasks_gantt {
+                top: 7.95rem;
+            }
+        }
         hr {margin: 0.55rem 0 !important;}
         [data-testid="stMetric"] {
             background: #ffffff;
@@ -1704,8 +1907,14 @@ def select_project(label: str = "Projet", include_all: bool = False) -> int | No
 
 
 def show_dashboard() -> None:
-    st.title("Tableau de bord")
-    project_id = select_project("Périmètre", include_all=True)
+    header = sticky_page_header("dashboard")
+    with header:
+        title_col, filter_col, month_col = st.columns([1.1, 2.25, 1.0], vertical_alignment="center")
+        with title_col:
+            sticky_header_title("Tableau de bord")
+        with filter_col:
+            project_id = select_project("Périmètre", include_all=True)
+        month_placeholder = month_col.empty()
     with session_scope() as session:
         metrics = kpis(session, project_id)
         task_data = tasks_df(session, project_id)
@@ -1736,7 +1945,8 @@ def show_dashboard() -> None:
     if not months:
         months = [current_month]
     month_index = months.index(current_month) if current_month in months else len(months) - 1
-    selected_month = st.selectbox("Mois", months, index=month_index)
+    with month_placeholder:
+        selected_month = st.selectbox("Mois", months, index=month_index)
     completion_row = completion_monthly[completion_monthly["Mois"] == selected_month]
     planned_tasks = int(completion_row["Tâches prévues"].iloc[0]) if not completion_row.empty else 0
     on_time_tasks = int(completion_row["Terminées à temps"].iloc[0]) if not completion_row.empty else 0
@@ -1754,11 +1964,41 @@ def show_dashboard() -> None:
 
 
 def show_projects() -> None:
-    st.title("Projets")
     with session_scope() as session:
         users = user_options(session)
         user_names = user_name_options(session)
         data = projects_df(session)
+
+    header = sticky_page_header("projects")
+    if not data.empty:
+        project_label_by_id = {
+            int(row["ID"]): f"{row.get('Code', '')} - {row.get('Projet', '')}"
+            for row in data.to_dict("records")
+            if row.get("ID")
+        }
+        project_ids_by_label = {label: project_id for project_id, label in project_label_by_id.items()}
+        project_label_list = [project_label_by_id[int(row["ID"])] for row in data.to_dict("records") if row.get("ID")]
+        default_project = project_label_by_id.get(int(st.session_state.get("selected_project_id") or 0))
+        default_selection = [default_project or project_label_list[0]]
+        selector_key = "projects_view_project_labels"
+        existing_projects = st.session_state.get(selector_key)
+        if isinstance(existing_projects, list):
+            valid_existing = [label for label in existing_projects if label in project_ids_by_label]
+            st.session_state[selector_key] = valid_existing or default_selection
+        else:
+            st.session_state[selector_key] = default_selection
+
+        with header:
+            title_col, filter_col, color_col = st.columns([0.65, 2.7, 0.95], vertical_alignment="center")
+            with title_col:
+                sticky_header_title("Projets")
+            selected_project_labels = filter_col.multiselect("Projets", project_label_list, key=selector_key)
+            color_placeholder = color_col.empty()
+    else:
+        with header:
+            sticky_header_title("Projets")
+        selected_project_labels = []
+        color_placeholder = None
 
     with st.expander("Créer un projet", expanded=False):
         with st.form("project_form"):
@@ -1803,24 +2043,6 @@ def show_projects() -> None:
         st.info("Aucun projet disponible.")
         return
 
-    project_label_by_id = {
-        int(row["ID"]): f"{row.get('Code', '')} - {row.get('Projet', '')}"
-        for row in data.to_dict("records")
-        if row.get("ID")
-    }
-    project_ids_by_label = {label: project_id for project_id, label in project_label_by_id.items()}
-    project_label_list = [project_label_by_id[int(row["ID"])] for row in data.to_dict("records") if row.get("ID")]
-    default_project = project_label_by_id.get(int(st.session_state.get("selected_project_id") or 0))
-    default_selection = [default_project or project_label_list[0]]
-    selector_key = "projects_view_project_labels"
-    existing_projects = st.session_state.get(selector_key)
-    if isinstance(existing_projects, list):
-        valid_existing = [label for label in existing_projects if label in project_ids_by_label]
-        st.session_state[selector_key] = valid_existing or default_selection
-    else:
-        st.session_state[selector_key] = default_selection
-
-    selected_project_labels = st.multiselect("Projets", project_label_list, key=selector_key)
     if not selected_project_labels:
         st.warning("Sélectionnez au moins un projet pour afficher le Gantt et la grille.")
         return
@@ -1832,7 +2054,8 @@ def show_projects() -> None:
     st.subheader("Gantt projets")
     st.caption("Modifiez les dates ou les montants : le Gantt se met à jour automatiquement. Double-cliquez une ligne pour ouvrir ses tâches.")
     color_options = [column for column in ["Budget", "Budget heures"] if column in filtered_data.columns]
-    color_field = st.selectbox("Colorer les projets par", color_options or ["Budget"], index=0)
+    with color_placeholder:
+        color_field = st.selectbox("Colorer les projets par", color_options or ["Budget"], index=0)
 
     gantt_container = st.container()
     st.subheader("Table projets")
@@ -1864,8 +2087,14 @@ def show_projects() -> None:
 
 
 def show_tasks() -> None:
-    st.title("Tâches et Gantt")
-    project_id = select_project()
+    header = sticky_page_header("tasks")
+    with header:
+        title_col, filter_col, color_col = st.columns([1.1, 2.1, 1.05], vertical_alignment="center")
+        with title_col:
+            sticky_header_title("Tâches et Gantt")
+        with filter_col:
+            project_id = select_project()
+        color_placeholder = color_col.empty()
     if not project_id:
         return
     with session_scope() as session:
@@ -1875,15 +2104,17 @@ def show_tasks() -> None:
         users = user_options(session)
         task_labels = task_options(session, project_id)
         budget_labels = budget_options(session, project_id)
+    with color_placeholder:
+        color_options = task_color_options(task_data)
+        color_field = st.selectbox("Colorer les tâches par", color_options or ["Temps prévu"], index=0)
 
-    gantt_tab, grouped_tab, create_tab, task_budget_tab, deps_tab, assign_tab = st.tabs(
+    gantt_tab, grouped_tab, create_tab, task_budget_tab, deps_tab, assign_tab = sticky_tabs(
+        "tasks",
         ["Gantt", "Vue groupée", "Nouvelle tâche", "Budget tâche", "Dépendances", "Affectations"]
     )
 
     with gantt_tab:
         st.subheader("Gantt tâches")
-        color_options = task_color_options(task_data)
-        color_field = st.selectbox("Colorer les tâches par", color_options or ["Temps prévu"], index=0)
         gantt_container = st.container()
         st.subheader("Table tâches")
         save_tasks = top_right_save_button(f"tasks_save_{project_id}")
@@ -2151,6 +2382,8 @@ def show_weekly_time_capture(
     update_success: str,
     caption_extra: str = "",
     title_level: str = "title",
+    filters_container=None,
+    filter_columns=None,
 ) -> None:
     if title:
         if title_level == "subheader":
@@ -2186,9 +2419,36 @@ def show_weekly_time_capture(
     if st.session_state.get(user_selector_key) not in user_labels:
         st.session_state[user_selector_key] = current_user_name if current_user_name in user_labels else user_labels[0]
 
-    project_col, user_col = st.columns([3, 2], vertical_alignment="bottom")
-    selected_project_labels = project_col.multiselect("Projets", project_label_list, key=project_selector_key)
+    week_key = f"{key_prefix}_week"
+    if week_key not in st.session_state:
+        st.session_state[week_key] = week_start(date.today())
+
+    if filter_columns is None:
+        controls_container = filters_container or sticky_toolbar(f"{key_prefix}_entry")
+        with controls_container:
+            project_col, user_col, week_prev_col, week_date_col, week_next_col = st.columns(
+                [2.75, 1.3, 0.32, 0.95, 0.32],
+                vertical_alignment="bottom",
+            )
+    else:
+        project_col, user_col, week_prev_col, week_date_col, week_next_col = filter_columns
+
+    selected_project_labels = project_col.multiselect(
+        "Projets",
+        project_label_list,
+        key=project_selector_key,
+        format_func=lambda label: str(label).split(" - ", 1)[0] if filter_columns is not None else label,
+    )
     selected_user = user_col.selectbox("Utilisateur", user_labels, key=user_selector_key)
+
+    if week_prev_col.button("‹", key=f"{week_key}_previous", use_container_width=True):
+        st.session_state[week_key] = week_start(st.session_state[week_key]) - timedelta(days=7)
+        st.rerun()
+    selected_day = week_date_col.date_input("Semaine", key=week_key)
+    if week_next_col.button("›", key=f"{week_key}_next", use_container_width=True):
+        st.session_state[week_key] = week_start(st.session_state[week_key]) + timedelta(days=7)
+        st.rerun()
+
     user_id = user_names[selected_user]
 
     if not selected_project_labels:
@@ -2198,18 +2458,6 @@ def show_weekly_time_capture(
     selected_project_ids = [project_labels[label] for label in selected_project_labels]
     st.session_state["selected_project_id"] = selected_project_ids[0]
     project_key = "_".join(str(project_id) for project_id in selected_project_ids)
-
-    week_prev_col, week_date_col, week_next_col = st.columns([1, 3, 1], vertical_alignment="bottom")
-    week_key = f"{key_prefix}_week"
-    if week_key not in st.session_state:
-        st.session_state[week_key] = week_start(date.today())
-    if week_prev_col.button("←", key=f"{week_key}_previous", use_container_width=True):
-        st.session_state[week_key] = week_start(st.session_state[week_key]) - timedelta(days=7)
-        st.rerun()
-    if week_next_col.button("→", key=f"{week_key}_next", use_container_width=True):
-        st.session_state[week_key] = week_start(st.session_state[week_key]) + timedelta(days=7)
-        st.rerun()
-    selected_day = week_date_col.date_input("Semaine", key=week_key)
 
     selected_week = week_start(selected_day)
     iso_year, iso_week, _ = selected_week.isocalendar()
@@ -2339,9 +2587,25 @@ def show_time_recap(
     entries_df_func,
     default_start: date,
     empty_message: str,
+    filters_container=None,
+    filter_columns=None,
 ) -> None:
     st.subheader(title)
-    selected_day = st.date_input("Date de démarrage", value=default_start, key=f"{key_prefix}_recap_start")
+    if filter_columns is None:
+        recap_controls = filters_container or sticky_toolbar(f"{key_prefix}_recap")
+        with recap_controls:
+            recap_date_col, filter_user_col, filter_project_col = st.columns(
+                [1.1, 1.9, 1.9],
+                vertical_alignment="bottom",
+            )
+    else:
+        recap_date_col, filter_user_col, filter_project_col = filter_columns
+
+    selected_day = recap_date_col.date_input(
+        "Date de démarrage",
+        value=default_start,
+        key=f"{key_prefix}_recap_start",
+    )
     selected_start = week_start(selected_day)
     selected_end = selected_start + timedelta(days=27)
     if selected_start != selected_day:
@@ -2383,7 +2647,6 @@ def show_time_recap(
     else:
         st.session_state[project_key] = [value for value in st.session_state[project_key] if value in project_filter_options]
 
-    filter_user_col, filter_project_col = st.columns(2)
     selected_users = filter_user_col.multiselect(
         "Utilisateurs",
         user_filter_options,
@@ -2421,9 +2684,35 @@ def show_time_recap(
 
 
 def show_timesheet() -> None:
-    st.title("Timesheet")
-    entry_tab, recap_tab = st.tabs(["Saisie Timesheet", "Récap. Timesheet"])
-    with entry_tab:
+    header = sticky_page_header("timesheet")
+    timesheet_views = ["Saisie", "Récap."]
+    legacy_timesheet_views = {"Saisie Timesheet": "Saisie", "Récap. Timesheet": "Récap."}
+    if st.session_state.get("timesheet_view") in legacy_timesheet_views:
+        st.session_state["timesheet_view"] = legacy_timesheet_views[st.session_state["timesheet_view"]]
+    current_view = st.session_state.get("timesheet_view", timesheet_views[0])
+    if current_view not in timesheet_views:
+        st.session_state["timesheet_view"] = timesheet_views[0]
+        current_view = timesheet_views[0]
+    with header:
+        if current_view == "Saisie":
+            title_col, view_col, project_col, user_col, prev_col, week_col, next_col = st.columns(
+                [0.72, 0.55, 1.7, 0.9, 0.24, 0.72, 0.24],
+                vertical_alignment="bottom",
+            )
+        else:
+            title_col, view_col, date_col, users_col, projects_col = st.columns(
+                [0.72, 0.55, 0.85, 1.55, 1.55],
+                vertical_alignment="bottom",
+            )
+        with title_col:
+            sticky_header_title("Timesheet")
+        active_view = view_col.selectbox(
+            "Vue Timesheet",
+            timesheet_views,
+            index=timesheet_views.index(current_view),
+            key="timesheet_view",
+        )
+    if active_view == "Saisie":
         show_weekly_time_capture(
             title="Saisie hebdomadaire",
             key_prefix="timesheet",
@@ -2438,21 +2727,51 @@ def show_timesheet() -> None:
             save_success="Pointages hebdomadaires enregistrés, tâches et budgets recalculés.",
             update_success="Pointages mis à jour, tâches et budgets recalculés.",
             title_level="subheader",
+            filters_container=header,
+            filter_columns=(project_col, user_col, prev_col, week_col, next_col),
         )
-    with recap_tab:
+    else:
         show_time_recap(
             title="Récap. Timesheet",
             key_prefix="timesheet",
             entries_df_func=time_entries_df,
             default_start=week_start(date.today()) - timedelta(weeks=3),
             empty_message="Aucun pointage sur les 4 semaines affichées.",
+            filters_container=header,
+            filter_columns=(date_col, users_col, projects_col),
         )
 
 
 def show_planning() -> None:
-    st.title("Planification")
-    entry_tab, recap_tab = st.tabs(["Saisie Planification", "Récap. Planification"])
-    with entry_tab:
+    header = sticky_page_header("planning")
+    planning_views = ["Saisie", "Récap."]
+    legacy_planning_views = {"Saisie Planification": "Saisie", "Récap. Planification": "Récap."}
+    if st.session_state.get("planning_view") in legacy_planning_views:
+        st.session_state["planning_view"] = legacy_planning_views[st.session_state["planning_view"]]
+    current_view = st.session_state.get("planning_view", planning_views[0])
+    if current_view not in planning_views:
+        st.session_state["planning_view"] = planning_views[0]
+        current_view = planning_views[0]
+    with header:
+        if current_view == "Saisie":
+            title_col, view_col, project_col, user_col, prev_col, week_col, next_col = st.columns(
+                [0.9, 0.55, 1.55, 0.85, 0.24, 0.72, 0.24],
+                vertical_alignment="bottom",
+            )
+        else:
+            title_col, view_col, date_col, users_col, projects_col = st.columns(
+                [0.9, 0.55, 0.85, 1.45, 1.45],
+                vertical_alignment="bottom",
+            )
+        with title_col:
+            sticky_header_title("Planification")
+        active_view = view_col.selectbox(
+            "Vue Planification",
+            planning_views,
+            index=planning_views.index(current_view),
+            key="planning_view",
+        )
+    if active_view == "Saisie":
         show_weekly_time_capture(
             title="Saisie hebdomadaire",
             key_prefix="planning",
@@ -2468,14 +2787,18 @@ def show_planning() -> None:
             update_success="Planification mise à jour. Le temps planifié futur des tâches est à jour.",
             caption_extra="Seules les dates à partir d'aujourd'hui alimentent le champ Temps planifié des tâches.",
             title_level="subheader",
+            filters_container=header,
+            filter_columns=(project_col, user_col, prev_col, week_col, next_col),
         )
-    with recap_tab:
+    else:
         show_time_recap(
             title="Récap. Planification",
             key_prefix="planning",
             entries_df_func=planned_time_entries_df,
             default_start=week_start(date.today()),
             empty_message="Aucune planification sur les 4 semaines affichées.",
+            filters_container=header,
+            filter_columns=(date_col, users_col, projects_col),
         )
 
 
@@ -2557,8 +2880,13 @@ def legacy_show_budget_lines() -> None:
 
 
 def show_budget() -> None:
-    st.title("Budget")
-    project_id = select_project()
+    header = sticky_page_header("budget")
+    with header:
+        title_col, filter_col = st.columns([0.8, 3.2], vertical_alignment="center")
+        with title_col:
+            sticky_header_title("Budget")
+        with filter_col:
+            project_id = select_project()
     if not project_id:
         return
 
@@ -2709,8 +3037,13 @@ def show_budget() -> None:
 
 
 def show_reports() -> None:
-    st.title("Rapports PDF")
-    project_id = select_project()
+    header = sticky_page_header("reports")
+    with header:
+        title_col, filter_col = st.columns([1.0, 3.0], vertical_alignment="center")
+        with title_col:
+            sticky_header_title("Rapports PDF")
+        with filter_col:
+            project_id = select_project()
     if not project_id:
         return
     with session_scope() as session:
@@ -2733,7 +3066,7 @@ def show_reports() -> None:
 
 
 def show_users() -> None:
-    st.title("Utilisateurs")
+    sticky_page_header("users", "Utilisateurs")
     if st.session_state["user"]["role"] != "admin":
         st.warning("Page réservée aux administrateurs.")
         return
