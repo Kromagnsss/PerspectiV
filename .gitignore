@@ -6,6 +6,8 @@ data/*.db
 data/*.sqlite
 logs/*.log
 reports/*.pdf
+reports/*.log
 reports/visual_checks/
+dist/
 
 *.laccdb

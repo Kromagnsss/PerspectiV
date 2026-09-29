@@ -1,0 +1,35 @@
+{
+  "name": "PerspectiV",
+  "slug": "perspectiv",
+  "categories": [10, 19],
+  "date_created": "2026-09-29",
+  "type": "ct",
+  "updateable": true,
+  "privileged": false,
+  "interface_port": 8080,
+  "documentation": "https://github.com/Kromagnsss/PerspectiV",
+  "website": "https://github.com/Kromagnsss/PerspectiV",
+  "repository": "https://github.com/Kromagnsss/PerspectiV",
+  "architectures": ["amd64", "arm64"],
+  "platforms": ["pve"],
+  "description": "Gestion locale de projets, budgets, Gantt, temps et planification avec API et MCP.",
+  "install_methods": [
+    {
+      "type": "default",
+      "script": "ct/perspectiv.sh",
+      "config_path": "/etc/perspectiv/perspectiv.env",
+      "resources": {"cpu": 2, "ram": 4096, "hdd": 16, "os": "Debian", "version": "13"}
+    }
+  ],
+  "default_credentials": {"username": null, "password": null},
+  "app_vars": [
+    {"name": "var_public_url", "label": "Public URL", "type": "text", "required": true},
+    {"name": "var_oidc_issuer", "label": "Keycloak issuer URL", "type": "text", "required": true},
+    {"name": "var_oidc_client_id", "label": "OIDC client ID", "type": "text", "default": "perspectiv-web"},
+    {"name": "var_oidc_client_secret", "label": "OIDC client secret", "type": "password", "secret": true, "required": true},
+    {"name": "var_admin_user", "label": "Initial admin username", "type": "text", "default": "admin"},
+    {"name": "var_admin_pass", "label": "Initial admin password", "type": "password", "secret": true},
+    {"name": "var_cloudflare_token", "label": "Cloudflare tunnel token", "type": "password", "secret": true}
+  ],
+  "notes": ["Deploy Keycloak in a separate LXC before enabling OIDC.", "Proxmox/PBS backups remain recommended."]
+}

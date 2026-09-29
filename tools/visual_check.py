@@ -141,9 +141,11 @@ def login(page, url: str, username: str, password: str) -> None:
         page.get_by_label("Utilisateur").fill(username)
         page.get_by_label("Mot de passe").fill(password)
         button.click()
+        button.wait_for(state="hidden", timeout=20000)
     except PlaywrightTimeoutError:
         pass
-    page.get_by_text("Tableau de bord", exact=False).first.wait_for(state="visible", timeout=20000)
+    page.locator('[class*="st-key-pv_sticky_header_dashboard"]').first.wait_for(state="visible", timeout=20000)
+    page.wait_for_timeout(1200)
 
 
 def navigate(page, nav_pattern: re.Pattern[str], header_selector: str | None = None) -> None:

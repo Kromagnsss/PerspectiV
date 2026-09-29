@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, func, inspect, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import (
+    AuditLog,
     Base,
     Budget,
     BudgetLine,
@@ -20,7 +21,14 @@ from .models import (
     User,
 )
 from .security import hash_password
-from .settings import DATABASE_URL
+from .settings import (
+    BOOTSTRAP_ADMIN_EMAIL,
+    BOOTSTRAP_ADMIN_NAME,
+    BOOTSTRAP_ADMIN_PASSWORD,
+    BOOTSTRAP_ADMIN_USERNAME,
+    DATABASE_URL,
+    ENVIRONMENT,
+)
 
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
@@ -42,12 +50,19 @@ def session_scope() -> Session:
 
 
 def init_db() -> None:
-    Base.metadata.create_all(engine)
-    migrate_schema()
+    if ENVIRONMENT == "production":
+        if "users" not in set(inspect(engine).get_table_names()):
+            raise RuntimeError("Schéma absent : exécutez 'alembic upgrade head' avant de démarrer PerspectiV.")
+    else:
+        Base.metadata.create_all(engine)
+        migrate_schema()
     with session_scope() as session:
         user_count = session.scalar(select(func.count(User.id)))
         if not user_count:
-            seed_demo(session)
+            if ENVIRONMENT == "production":
+                seed_production_admin(session)
+            else:
+                seed_demo(session)
             recompute_actuals(session)
         else:
             ensure_budget_links(session)
@@ -96,6 +111,13 @@ def migrate_schema() -> None:
                 if column not in time_columns:
                     connection.execute(text(f"ALTER TABLE time_entries ADD COLUMN {column} {ddl}"))
 
+    inspector = inspect(engine)
+    if "users" in set(inspector.get_table_names()):
+        user_columns = {column["name"] for column in inspector.get_columns("users")}
+        if "oidc_subject" not in user_columns:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE users ADD COLUMN oidc_subject VARCHAR(255)"))
+
 
 def seed_demo(session: Session) -> None:
     admin = User(
@@ -124,7 +146,6 @@ def seed_demo(session: Session) -> None:
     )
     session.add_all([admin, benoit, paul])
     session.flush()
-
     project = Project(
         code="PRJ-001",
         name="Refonte outil projets local",
@@ -211,6 +232,25 @@ def seed_demo(session: Session) -> None:
 
     session.flush()
     recompute_actuals(session)
+
+
+def seed_production_admin(session: Session) -> None:
+    if len(BOOTSTRAP_ADMIN_PASSWORD) < 14:
+        raise RuntimeError(
+            "PERSPECTIV_BOOTSTRAP_ADMIN_PASSWORD doit contenir au moins 14 caractères lors du premier démarrage."
+        )
+    session.add(
+        User(
+            username=BOOTSTRAP_ADMIN_USERNAME,
+            full_name=BOOTSTRAP_ADMIN_NAME,
+            email=BOOTSTRAP_ADMIN_EMAIL or None,
+            role="admin",
+            password_hash=hash_password(BOOTSTRAP_ADMIN_PASSWORD),
+            hourly_rate=Decimal("0.00"),
+            active=True,
+        )
+    )
+    session.flush()
 
 
 def legacy_ensure_budget_line_links(session: Session) -> None:

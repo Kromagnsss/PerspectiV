@@ -22,6 +22,7 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(220))
     hourly_rate: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("85.00"))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    oidc_subject: Mapped[str | None] = mapped_column(String(255), unique=True, index=True)
 
     assignments: Mapped[list["TaskAssignment"]] = relationship(back_populates="user")
     time_entries: Mapped[list["TimeEntry"]] = relationship(back_populates="user")
@@ -203,3 +204,44 @@ class BudgetLine(Base):
     project: Mapped[Project] = relationship(back_populates="budget_lines")
     budget: Mapped[Budget | None] = relationship(back_populates="lines")
     tasks: Mapped[list[Task]] = relationship(back_populates="budget_line")
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    actor_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)
+    source: Mapped[str] = mapped_column(String(24), default="api", index=True)
+    action: Mapped[str] = mapped_column(String(80), index=True)
+    entity_type: Mapped[str] = mapped_column(String(80), index=True)
+    entity_id: Mapped[str | None] = mapped_column(String(80), index=True)
+    before_json: Mapped[str | None] = mapped_column(Text)
+    after_json: Mapped[str | None] = mapped_column(Text)
+    result: Mapped[str] = mapped_column(String(24), default="success")
+    request_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class IdempotencyRecord(Base):
+    __tablename__ = "idempotency_records"
+    __table_args__ = (UniqueConstraint("user_id", "operation", "idempotency_key", name="uq_idempotency"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    operation: Mapped[str] = mapped_column(String(80), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(160))
+    response_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class DeleteConfirmation(Base):
+    __tablename__ = "delete_confirmations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    entity_type: Mapped[str] = mapped_column(String(80), index=True)
+    entity_id: Mapped[int] = mapped_column(Integer)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

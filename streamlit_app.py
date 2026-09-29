@@ -12,6 +12,7 @@ try:
 except ImportError:  # pragma: no cover - Streamlit installe normalement Pillow.
     Image = None
 from st_aggrid import AgGrid, DataReturnMode, JsCode
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 
 from perspectiv.charts import (
@@ -26,7 +27,9 @@ from perspectiv.charts import (
     workload_bar,
 )
 from perspectiv.database import init_db, session_scope
+from perspectiv.models import User
 from perspectiv.reports import build_project_pdf
+from perspectiv.settings import OIDC_ISSUER
 from perspectiv.services import (
     add_assignment,
     add_budget,
@@ -1831,10 +1834,21 @@ def login() -> None:
             unsafe_allow_html=True,
         )
         st.subheader("Connexion")
-        with st.form("login_form"):
-            username = st.text_input("Utilisateur", value="admin")
-            password = st.text_input("Mot de passe", type="password", value="admin")
-            submitted = st.form_submit_button("Se connecter", type="primary", use_container_width=True)
+        if OIDC_ISSUER:
+            st.button(
+                "Se connecter avec PerspectiV SSO",
+                type="primary",
+                use_container_width=True,
+                on_click=st.login,
+                args=("keycloak",),
+            )
+            submitted = False
+            username = password = ""
+        else:
+            with st.form("login_form"):
+                username = st.text_input("Utilisateur", value="admin")
+                password = st.text_input("Mot de passe", type="password", value="admin")
+                submitted = st.form_submit_button("Se connecter", type="primary", use_container_width=True)
     if submitted:
         with session_scope() as session:
             user = authenticate(session, username, password)
@@ -1842,10 +1856,27 @@ def login() -> None:
                 st.session_state["user"] = {"id": user.id, "name": user.full_name, "role": user.role}
                 st.rerun()
             st.error("Identifiant ou mot de passe incorrect.")
-    st.info("Compte de démonstration : admin / admin. À changer avant usage réel.")
+    if not OIDC_ISSUER:
+        st.info("Compte de démonstration : admin / admin. À changer avant usage réel.")
 
 
 def require_login() -> None:
+    if OIDC_ISSUER and getattr(st.user, "is_logged_in", False):
+        subject = str(getattr(st.user, "sub", "") or "")
+        username = str(getattr(st.user, "preferred_username", "") or "").lower()
+        email = str(getattr(st.user, "email", "") or "").lower()
+        with session_scope() as session:
+            user = session.scalar(select(User).where(User.oidc_subject == subject)) if subject else None
+            if not user and (username or email):
+                user = session.scalar(select(User).where(or_(User.username == username, User.email == email)))
+                if user and subject and not user.oidc_subject:
+                    user.oidc_subject = subject
+            if not user or not user.active:
+                st.error("Ce compte SSO n'est pas rattaché à un utilisateur PerspectiV actif.")
+                if st.button("Se déconnecter"):
+                    st.logout()
+                st.stop()
+            st.session_state["user"] = {"id": user.id, "name": user.full_name, "role": user.role}
     if "user" not in st.session_state:
         login()
         st.stop()
@@ -1879,7 +1910,10 @@ def sidebar() -> str:
             st.rerun()
     if st.sidebar.button("Déconnexion", icon=":material/logout:", use_container_width=True):
         st.session_state.clear()
-        st.rerun()
+        if OIDC_ISSUER and getattr(st.user, "is_logged_in", False):
+            st.logout()
+        else:
+            st.rerun()
     return st.session_state["navigation_page"]
 
 

@@ -1,8 +1,16 @@
-streamlit>=1.39
+streamlit>=1.42
 streamlit-aggrid>=1.2
 pandas>=2.2
 plotly>=5.24
 SQLAlchemy>=2.0
+alembic>=1.14
+fastapi>=0.115
+uvicorn[standard]>=0.34
+mcp>=2.0,<3
+PyJWT[crypto]>=2.10
+psycopg[binary]>=3.2
+Authlib>=1.4
+httpx>=0.28
 networkx>=3.3
 reportlab>=4.2
 Babel>=2.15

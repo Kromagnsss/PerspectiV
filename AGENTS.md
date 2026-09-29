@@ -25,3 +25,5 @@ Utilise cette nouvelle entrée pour traiter le prompt.
 - Pour valider l'affichage, privilégier une QA visuelle reproductible qui sauvegarde des captures PNG locales et un rapport JSON d'assertions inspectables.
 - Ne pas rendre les bandeaux si compacts qu'ils deviennent difficiles à repérer ; privilégier un fond lisible, une bordure claire, une ombre légère et des libellés visibles.
 - En usage local Streamlit, tenir compte de la barre native Streamlit (`Deploy`, menu, contrôle de sidebar) qui peut recouvrir l'application ; la masquer ou l'abaisser si elle gêne l'interface.
+- Pour toute distribution serveur ou mise a jour, utiliser des versions explicites, executer une sauvegarde avant migration, controler un endpoint de sante apres redemarrage et prevoir un retour arriere verifiable.
+- Toute API ou integration d'agent doit reutiliser les regles metier de l'application, appliquer les droits cote serveur, journaliser les mutations et ne jamais exposer d'acces SQL generique.

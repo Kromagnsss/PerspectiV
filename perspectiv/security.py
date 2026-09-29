@@ -5,7 +5,7 @@ import hmac
 import os
 
 
-PBKDF2_ITERATIONS = 180_000
+PBKDF2_ITERATIONS = 600_000
 
 
 def hash_password(password: str) -> str:

@@ -1,0 +1,33 @@
+name: Release PerspectiV
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked --extra dev
+      - run: uv run python -m compileall streamlit_app.py perspectiv tools
+      - run: uv run pytest
+      - run: shellcheck proxmox/ct/perspectiv.sh proxmox/install/perspectiv-install.sh proxmox/scripts/perspectiv-update-check.sh
+      - name: Build archive
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          git archive --format=tar.gz --prefix="perspectiv-${version}/" -o "perspectiv-${version}.tar.gz" HEAD
+          sha256sum "perspectiv-${version}.tar.gz" > "perspectiv-${version}.tar.gz.sha256"
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            perspectiv-*.tar.gz
+            perspectiv-*.sha256
