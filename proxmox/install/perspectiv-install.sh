@@ -15,7 +15,7 @@ if [[ -z "${var_public_url:-}" || -z "${var_oidc_issuer:-}" || -z "${var_oidc_cl
 fi
 
 msg_info "Installing PerspectiV dependencies"
-$STD apt install -y build-essential libpq-dev nginx postgresql-client
+$STD apt install -y build-essential libpq-dev nginx postgresql-17 postgresql-client
 msg_ok "Installed PerspectiV dependencies"
 
 PG_VERSION="17" setup_postgresql
