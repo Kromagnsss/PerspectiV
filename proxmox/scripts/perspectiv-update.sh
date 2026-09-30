@@ -10,13 +10,17 @@ KEEP_BACKUPS="${PERSPECTIV_KEEP_BACKUPS:-7}"
 KEEP_RELEASES="${PERSPECTIV_KEEP_RELEASES:-4}"
 FORCE=0
 CHECK_ONLY=0
+ALLOW_DOWNGRADE=0
+RESTORE_LATEST=0
 
 usage() {
   cat <<'EOF'
-Usage: update [--check] [--force]
+Usage: update [--check] [--force] [--allow-downgrade] [--restore-latest]
 
   --check  Affiche la version disponible sans modifier l'installation.
   --force  Reinstalle la derniere version meme si elle est deja active.
+  --allow-downgrade  Autorise explicitement l'installation d'une version inferieure.
+  --restore-latest   Restaure la derniere sauvegarde et sa release precedente.
 EOF
 }
 
@@ -27,6 +31,8 @@ while (($#)); do
   case "$1" in
     --check) CHECK_ONLY=1 ;;
     --force) FORCE=1 ;;
+    --allow-downgrade) ALLOW_DOWNGRADE=1 ;;
+    --restore-latest) RESTORE_LATEST=1 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; fail "Option inconnue: $1" ;;
   esac
@@ -43,12 +49,49 @@ if ! command -v jq >/dev/null 2>&1; then
   apt-get install -y -qq jq
 fi
 
-for command in curl jq tar uv pg_dump pg_restore systemctl flock sha256sum; do
+for command in curl jq tar uv pg_dump pg_restore psql systemctl flock sha256sum; do
   command -v "${command}" >/dev/null 2>&1 || fail "Commande requise absente: ${command}"
 done
 
 exec 9>/run/lock/perspectiv-update.lock
 flock -n 9 || fail "Une autre mise a jour PerspectiV est deja en cours."
+
+restore_backup() {
+  restore_dir="$1"
+  [[ -f "${restore_dir}/database.dump" ]] || fail "Sauvegarde PostgreSQL absente dans ${restore_dir}."
+  set -a
+  # shellcheck disable=SC1090
+  source "${CONFIG_FILE}"
+  set +a
+  [[ -n "${PERSPECTIV_DATABASE_URL:-}" ]] || fail "PERSPECTIV_DATABASE_URL est absent de la configuration."
+  restore_pg_url="${PERSPECTIV_DATABASE_URL/postgresql+psycopg:/postgresql:}"
+  restore_release=""
+  if [[ -f "${restore_dir}/previous-release" ]]; then
+    restore_release="$(cat "${restore_dir}/previous-release")"
+    [[ -d "${restore_release}" ]] || fail "Release de restauration introuvable: ${restore_release}"
+  fi
+
+  log "Arret des services pour restaurer ${restore_dir}..."
+  systemctl stop perspectiv-ui perspectiv-api
+  if [[ -n "${restore_release}" ]]; then
+    ln -sfn "${restore_release}" "${INSTALL_ROOT}/current"
+  fi
+  psql "${restore_pg_url}" -v ON_ERROR_STOP=1 -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
+  pg_restore --exit-on-error --no-owner --dbname="${restore_pg_url}" "${restore_dir}/database.dump"
+  systemctl start perspectiv-api perspectiv-ui
+  if ! curl -fsS --retry 15 --retry-delay 2 "${HEALTH_URL}" >/dev/null; then
+    journalctl -u perspectiv-api -u perspectiv-ui -n 100 --no-pager >&2 || true
+    fail "La restauration est terminee mais le healthcheck echoue."
+  fi
+  log "Restauration terminee avec succes."
+}
+
+if ((RESTORE_LATEST)); then
+  latest_backup="$(find "${BACKUP_ROOT}" -mindepth 1 -maxdepth 1 -type d -exec test -f '{}/database.dump' \; -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)"
+  [[ -n "${latest_backup}" ]] || fail "Aucune sauvegarde PerspectiV utilisable."
+  restore_backup "${latest_backup}"
+  exit 0
+fi
 
 api_url="https://api.github.com/repos/${REPOSITORY}/releases/latest"
 release_json="$(curl -fsSL --retry 3 --connect-timeout 10 "${api_url}")" || fail "Impossible de consulter la derniere release GitHub."
@@ -66,12 +109,21 @@ current_version="${current_version:-inconnue}"
 log "Version installee: ${current_version}"
 log "Derniere release:  ${latest_version}"
 if ((CHECK_ONLY)); then
-  [[ "${current_version}" == "${latest_version}" ]] && log "PerspectiV est a jour." || log "Une mise a jour est disponible."
+  if [[ "${current_version}" == "${latest_version}" ]]; then
+    log "PerspectiV est a jour."
+  elif [[ "${current_version}" != "inconnue" && "$(printf '%s\n%s\n' "${latest_version}" "${current_version}" | sort -V | head -n1)" == "${latest_version}" ]]; then
+    log "La release publiee est plus ancienne que l'installation; aucune mise a jour ne sera appliquee."
+  else
+    log "Une mise a jour est disponible."
+  fi
   exit 0
 fi
 if [[ "${current_version}" == "${latest_version}" && ${FORCE} -eq 0 ]]; then
   log "PerspectiV est deja a jour. Utilisez --force pour reinstaller cette release."
   exit 0
+fi
+if [[ "${current_version}" != "inconnue" && "$(printf '%s\n%s\n' "${latest_version}" "${current_version}" | sort -V | head -n1)" == "${latest_version}" && "${latest_version}" != "${current_version}" && ${ALLOW_DOWNGRADE} -eq 0 ]]; then
+  fail "Refus du downgrade ${current_version} -> ${latest_version}. Utilisez --allow-downgrade uniquement si cette operation est voulue."
 fi
 
 timestamp="$(date +%Y%m%d_%H%M%S)"
@@ -111,6 +163,8 @@ fi
 mkdir -p "${release_dir}" "${backup_dir}"
 tar -xzf "${archive}" --strip-components=1 -C "${release_dir}"
 [[ -f "${release_dir}/pyproject.toml" && -f "${release_dir}/uv.lock" ]] || fail "La release ne contient pas une application PerspectiV complete."
+archive_version="$(sed -n 's/^__version__ = "\([^"]*\)"/\1/p' "${release_dir}/perspectiv/version.py" | head -n1)"
+[[ "${archive_version}" == "${latest_version}" ]] || fail "Le tag ${latest_tag} contient la version ${archive_version:-inconnue}; publication incoherente refusee."
 
 log "Preparation de l'environnement Python..."
 (
@@ -140,9 +194,11 @@ rollback() {
   log "Echec de la mise a jour; restauration de la release et de la base..."
   systemctl stop perspectiv-ui perspectiv-api >/dev/null 2>&1 || true
   ln -sfn "${previous_release}" "${INSTALL_ROOT}/current"
-  pg_restore --clean --if-exists --no-owner --dbname="${pg_url}" "${backup_dir}/database.dump"
-  systemctl start perspectiv-api perspectiv-ui
-  if curl -fsS --retry 12 --retry-delay 2 "${HEALTH_URL}" >/dev/null; then
+  restore_ok=1
+  psql "${pg_url}" -v ON_ERROR_STOP=1 -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;' || restore_ok=0
+  pg_restore --exit-on-error --no-owner --dbname="${pg_url}" "${backup_dir}/database.dump" || restore_ok=0
+  systemctl start perspectiv-api perspectiv-ui || restore_ok=0
+  if [[ ${restore_ok} -eq 1 ]] && curl -fsS --retry 12 --retry-delay 2 "${HEALTH_URL}" >/dev/null; then
     log "Retour arriere termine."
   else
     printf '[PerspectiV] ERREUR: retour arriere incomplet; sauvegarde: %s\n' "${backup_dir}" >&2
@@ -177,6 +233,7 @@ systemctl daemon-reload
 systemctl start perspectiv-api perspectiv-ui
 
 if ! curl -fsS --retry 15 --retry-delay 2 "${HEALTH_URL}" >/dev/null; then
+  journalctl -u perspectiv-api -u perspectiv-ui -n 100 --no-pager >&2 || true
   rollback
   exit 1
 fi

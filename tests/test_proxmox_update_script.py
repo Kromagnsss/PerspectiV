@@ -23,12 +23,23 @@ def test_updater_has_backup_healthcheck_and_rollback_guards() -> None:
         "pg_dump --format=custom",
         ".venv/bin/alembic upgrade head",
         "rollback()",
-        "pg_restore --clean --if-exists",
+        "pg_restore --exit-on-error",
         'curl -fsS --retry 15 --retry-delay 2 "${HEALTH_URL}"',
         "ln -sfn /usr/local/sbin/perspectiv-update /usr/bin/update",
     ]
     for fragment in required_fragments:
         assert fragment in updater
+
+
+def test_updater_refuses_implicit_downgrades_and_restores_clean_schema() -> None:
+    updater = (ROOT / "proxmox/scripts/perspectiv-update.sh").read_text(encoding="utf-8")
+    assert "--allow-downgrade" in updater
+    assert "Refus du downgrade" in updater
+    assert "archive_version" in updater
+    assert "publication incoherente refusee" in updater
+    assert "--restore-latest" in updater
+    assert "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" in updater
+    assert "pg_restore --exit-on-error" in updater
 
 
 def test_community_update_function_bootstraps_standalone_updater() -> None:

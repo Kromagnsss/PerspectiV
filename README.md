@@ -101,6 +101,14 @@ update --check
 update
 ```
 
+L'updater refuse les downgrades implicites. En cas d'echec ayant laisse la base dans un etat migre, restaurer la derniere sauvegarde pre-update et sa release associee avec :
+
+```bash
+update --restore-latest
+```
+
+L'option `--allow-downgrade` existe pour une intervention volontaire et controlee uniquement.
+
 Pour un conteneur PerspectiV installe avant l'ajout de cette commande, l'amorcer une seule fois :
 
 ```bash
