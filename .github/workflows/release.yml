@@ -19,7 +19,7 @@ jobs:
       - run: uv sync --locked --extra dev
       - run: uv run python -m compileall streamlit_app.py perspectiv tools
       - run: uv run pytest
-      - run: shellcheck proxmox/ct/perspectiv.sh proxmox/install/perspectiv-install.sh proxmox/scripts/perspectiv-update-check.sh
+      - run: shellcheck proxmox/ct/perspectiv.sh proxmox/install/perspectiv-install.sh proxmox/scripts/perspectiv-update.sh proxmox/scripts/perspectiv-update-check.sh
       - name: Build archive
         run: |
           version="${GITHUB_REF_NAME#v}"

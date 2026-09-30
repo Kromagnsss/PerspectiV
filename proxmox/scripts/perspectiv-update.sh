@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+REPOSITORY="${PERSPECTIV_GITHUB_REPOSITORY:-Kromagnsss/PerspectiV}"
+INSTALL_ROOT="${PERSPECTIV_INSTALL_ROOT:-/opt/perspectiv}"
+CONFIG_FILE="${PERSPECTIV_CONFIG_FILE:-/etc/perspectiv/perspectiv.env}"
+BACKUP_ROOT="${PERSPECTIV_BACKUP_ROOT:-/var/lib/perspectiv/backups}"
+HEALTH_URL="${PERSPECTIV_HEALTH_URL:-http://127.0.0.1:8000/health}"
+KEEP_BACKUPS="${PERSPECTIV_KEEP_BACKUPS:-7}"
+KEEP_RELEASES="${PERSPECTIV_KEEP_RELEASES:-4}"
+FORCE=0
+CHECK_ONLY=0
+
+usage() {
+  cat <<'EOF'
+Usage: update [--check] [--force]
+
+  --check  Affiche la version disponible sans modifier l'installation.
+  --force  Reinstalle la derniere version meme si elle est deja active.
+EOF
+}
+
+log() { printf '[PerspectiV] %s\n' "$*"; }
+fail() { printf '[PerspectiV] ERREUR: %s\n' "$*" >&2; exit 1; }
+
+while (($#)); do
+  case "$1" in
+    --check) CHECK_ONLY=1 ;;
+    --force) FORCE=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; fail "Option inconnue: $1" ;;
+  esac
+  shift
+done
+
+[[ ${EUID} -eq 0 ]] || fail "La mise a jour doit etre executee en tant que root."
+[[ -L "${INSTALL_ROOT}/current" ]] || fail "Installation absente: ${INSTALL_ROOT}/current est introuvable."
+[[ -f "${CONFIG_FILE}" ]] || fail "Configuration absente: ${CONFIG_FILE} est introuvable."
+
+if ! command -v jq >/dev/null 2>&1; then
+  log "Installation de jq, requis pour interroger les releases GitHub..."
+  apt-get update -qq
+  apt-get install -y -qq jq
+fi
+
+for command in curl jq tar uv pg_dump pg_restore systemctl flock sha256sum; do
+  command -v "${command}" >/dev/null 2>&1 || fail "Commande requise absente: ${command}"
+done
+
+exec 9>/run/lock/perspectiv-update.lock
+flock -n 9 || fail "Une autre mise a jour PerspectiV est deja en cours."
+
+api_url="https://api.github.com/repos/${REPOSITORY}/releases/latest"
+release_json="$(curl -fsSL --retry 3 --connect-timeout 10 "${api_url}")" || fail "Impossible de consulter la derniere release GitHub."
+latest_tag="$(jq -er '.tag_name' <<<"${release_json}")" || fail "La release GitHub ne contient pas de tag."
+latest_version="${latest_tag#v}"
+archive_name="perspectiv-${latest_version}.tar.gz"
+archive_url="$(jq -r --arg name "${archive_name}" '.assets[]? | select(.name == $name) | .browser_download_url' <<<"${release_json}" | head -n1)"
+if [[ -z "${archive_url}" ]]; then
+  archive_url="$(jq -er '.tarball_url' <<<"${release_json}")" || fail "Archive de release introuvable."
+  archive_name="github-${latest_tag}.tar.gz"
+fi
+current_version="$(sed -n 's/^__version__ = "\([^"]*\)"/\1/p' "${INSTALL_ROOT}/current/perspectiv/version.py" 2>/dev/null | head -n1)"
+current_version="${current_version:-inconnue}"
+
+log "Version installee: ${current_version}"
+log "Derniere release:  ${latest_version}"
+if ((CHECK_ONLY)); then
+  [[ "${current_version}" == "${latest_version}" ]] && log "PerspectiV est a jour." || log "Une mise a jour est disponible."
+  exit 0
+fi
+if [[ "${current_version}" == "${latest_version}" && ${FORCE} -eq 0 ]]; then
+  log "PerspectiV est deja a jour. Utilisez --force pour reinstaller cette release."
+  exit 0
+fi
+
+timestamp="$(date +%Y%m%d_%H%M%S)"
+backup_dir="${BACKUP_ROOT}/${timestamp}"
+release_dir="${INSTALL_ROOT}/releases/${latest_version}-${timestamp}"
+temp_dir="$(mktemp -d /tmp/perspectiv-update.XXXXXX)"
+archive="${temp_dir}/${archive_name}"
+previous_release="$(readlink -f "${INSTALL_ROOT}/current")"
+activated=0
+rollback_needed=0
+
+cleanup() {
+  rm -rf -- "${temp_dir}"
+  if [[ ${activated} -eq 0 && -d "${release_dir}" ]]; then
+    rm -rf -- "${release_dir}"
+  fi
+}
+trap cleanup EXIT
+
+log "Telechargement de ${latest_tag}..."
+curl -fL --retry 3 --connect-timeout 10 "${archive_url}" -o "${archive}"
+tar -tzf "${archive}" >/dev/null || fail "L'archive telechargee est invalide."
+
+checksum_url="$(jq -r --arg name "${archive_name}.sha256" '.assets[]? | select(.name == $name) | .browser_download_url' <<<"${release_json}" | head -n1)"
+if [[ -n "${checksum_url}" ]]; then
+  checksum_file="${temp_dir}/checksums.sha256"
+  curl -fsSL --retry 3 "${checksum_url}" -o "${checksum_file}"
+  expected_checksum="$(grep -Eio '[a-f0-9]{64}' "${checksum_file}" | head -n1)"
+  [[ -n "${expected_checksum}" ]] || fail "Somme SHA-256 illisible."
+  actual_checksum="$(sha256sum "${archive}" | awk '{print $1}')"
+  [[ "${actual_checksum}" == "${expected_checksum}" ]] || fail "La somme SHA-256 de l'archive ne correspond pas."
+  log "Somme SHA-256 verifiee."
+else
+  log "Aucun fichier SHA-256 publie; integrite tar et transport HTTPS verifies."
+fi
+
+mkdir -p "${release_dir}" "${backup_dir}"
+tar -xzf "${archive}" --strip-components=1 -C "${release_dir}"
+[[ -f "${release_dir}/pyproject.toml" && -f "${release_dir}/uv.lock" ]] || fail "La release ne contient pas une application PerspectiV complete."
+
+log "Preparation de l'environnement Python..."
+(
+  cd "${release_dir}"
+  uv sync --locked --no-editable --no-dev
+)
+
+set -a
+# shellcheck disable=SC1090
+source "${CONFIG_FILE}"
+set +a
+[[ -n "${PERSPECTIV_DATABASE_URL:-}" ]] || fail "PERSPECTIV_DATABASE_URL est absent de la configuration."
+pg_url="${PERSPECTIV_DATABASE_URL/postgresql+psycopg:/postgresql:}"
+
+log "Sauvegarde de PostgreSQL et de la configuration..."
+pg_dump --format=custom --file="${backup_dir}/database.dump" "${pg_url}"
+cp -a "${CONFIG_FILE}" "${backup_dir}/perspectiv.env"
+if [[ -f /root/.streamlit/secrets.toml ]]; then
+  mkdir -p "${backup_dir}/streamlit"
+  cp -a /root/.streamlit/secrets.toml "${backup_dir}/streamlit/secrets.toml"
+fi
+printf '%s\n' "${previous_release}" >"${backup_dir}/previous-release"
+
+rollback() {
+  rollback_needed=0
+  set +e
+  log "Echec de la mise a jour; restauration de la release et de la base..."
+  systemctl stop perspectiv-ui perspectiv-api >/dev/null 2>&1 || true
+  ln -sfn "${previous_release}" "${INSTALL_ROOT}/current"
+  pg_restore --clean --if-exists --no-owner --dbname="${pg_url}" "${backup_dir}/database.dump"
+  systemctl start perspectiv-api perspectiv-ui
+  if curl -fsS --retry 12 --retry-delay 2 "${HEALTH_URL}" >/dev/null; then
+    log "Retour arriere termine."
+  else
+    printf '[PerspectiV] ERREUR: retour arriere incomplet; sauvegarde: %s\n' "${backup_dir}" >&2
+  fi
+  set -e
+}
+
+on_error() {
+  exit_code=$?
+  trap - ERR
+  if [[ ${rollback_needed} -eq 1 ]]; then
+    rollback
+  fi
+  exit "${exit_code}"
+}
+trap on_error ERR
+
+log "Application des migrations et activation de ${latest_tag}..."
+rollback_needed=1
+systemctl stop perspectiv-ui perspectiv-api
+if ! (
+  cd "${release_dir}"
+  .venv/bin/alembic upgrade head
+); then
+  rollback
+  exit 1
+fi
+
+printf '%s\n' "${latest_tag}" >"${release_dir}/.perspectiv-release"
+ln -sfn "${release_dir}" "${INSTALL_ROOT}/current"
+systemctl daemon-reload
+systemctl start perspectiv-api perspectiv-ui
+
+if ! curl -fsS --retry 15 --retry-delay 2 "${HEALTH_URL}" >/dev/null; then
+  rollback
+  exit 1
+fi
+activated=1
+rollback_needed=0
+
+install -m 0755 "${INSTALL_ROOT}/current/proxmox/scripts/perspectiv-update.sh" /usr/local/sbin/perspectiv-update
+install -m 0755 "${INSTALL_ROOT}/current/proxmox/scripts/perspectiv-update-check.sh" /usr/local/sbin/perspectiv-update-check
+ln -sfn /usr/local/sbin/perspectiv-update /usr/bin/update
+
+find "${BACKUP_ROOT}" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\0' \
+  | sort -z -nr | tail -z -n "+$((KEEP_BACKUPS + 1))" | cut -z -d' ' -f2- | xargs -0r rm -rf --
+find "${INSTALL_ROOT}/releases" -mindepth 1 -maxdepth 1 -type d ! -samefile "${INSTALL_ROOT}/current" -printf '%T@ %p\0' \
+  | sort -z -nr | tail -z -n "+$((KEEP_RELEASES + 1))" | cut -z -d' ' -f2- | xargs -0r rm -rf --
+
+log "Mise a jour vers ${latest_tag} terminee avec succes."
+log "Sauvegarde: ${backup_dir}"

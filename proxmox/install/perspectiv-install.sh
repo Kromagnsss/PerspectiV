@@ -15,7 +15,7 @@ if [[ -z "${var_public_url:-}" || -z "${var_oidc_issuer:-}" || -z "${var_oidc_cl
 fi
 
 msg_info "Installing PerspectiV dependencies"
-$STD apt install -y build-essential libpq-dev nginx postgresql-17 postgresql-client
+$STD apt install -y build-essential jq libpq-dev nginx postgresql-17 postgresql-client
 msg_ok "Installed PerspectiV dependencies"
 
 PG_VERSION="17" setup_postgresql
@@ -144,6 +144,7 @@ ln -sf /etc/nginx/sites-available/perspectiv /etc/nginx/sites-enabled/perspectiv
 nginx -t
 
 install -m 0755 /opt/perspectiv/current/proxmox/scripts/perspectiv-update-check.sh /usr/local/sbin/perspectiv-update-check
+install -m 0755 /opt/perspectiv/current/proxmox/scripts/perspectiv-update.sh /usr/local/sbin/perspectiv-update
 systemctl daemon-reload
 systemctl enable -q --now perspectiv-api perspectiv-ui nginx
 msg_ok "Created PerspectiV services"
@@ -169,4 +170,5 @@ chmod 600 /root/perspectiv-credentials.txt
 
 motd_ssh
 customize
+ln -sfn /usr/local/sbin/perspectiv-update /usr/bin/update
 cleanup_lxc

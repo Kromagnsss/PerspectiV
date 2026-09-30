@@ -94,7 +94,22 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Kromagnsss/PerspectiV/ma
 
 Le mode avance permet de fournir l'URL publique, l'issuer Keycloak, le secret OIDC et, facultativement, le jeton Cloudflare Tunnel. Les routes Cloudflare doivent envoyer le domaine public vers le port `8080` du LXC. Le connecteur ChatGPT utilise `https://perspectiv.example.com/mcp`.
 
-Les releases sont installees dans `/opt/perspectiv/releases`, la release active est exposee par `/opt/perspectiv/current`, la configuration est dans `/etc/perspectiv/perspectiv.env` et les sauvegardes dans `/var/lib/perspectiv/backups`. Relancer le script Community Scripts sur le conteneur existant declenche `update_script()` : sauvegarde PostgreSQL et configuration, nouvelle release isolee, migration Alembic, controle `/health`, puis restauration automatique de la base et de l'ancienne release en cas d'echec. Les sauvegardes Proxmox/PBS restent recommandees.
+Les releases sont installees dans `/opt/perspectiv/releases`, la release active est exposee par `/opt/perspectiv/current`, la configuration est dans `/etc/perspectiv/perspectiv.env` et les sauvegardes dans `/var/lib/perspectiv/backups`. Dans le LXC, la commande `update` declenche le script versionne `perspectiv-update` : sauvegarde PostgreSQL et configuration, verification de l'archive, nouvelle release isolee, migration Alembic, controle `/health`, puis restauration automatique de la base et de l'ancienne release en cas d'echec. Les sauvegardes Proxmox/PBS restent recommandees.
+
+```bash
+update --check
+update
+```
+
+Pour un conteneur PerspectiV installe avant l'ajout de cette commande, l'amorcer une seule fois :
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Kromagnsss/PerspectiV/main/proxmox/scripts/perspectiv-update.sh \
+  -o /usr/local/sbin/perspectiv-update
+chmod 0755 /usr/local/sbin/perspectiv-update
+ln -sfn /usr/local/sbin/perspectiv-update /usr/bin/update
+update --check
+```
 
 Pour importer la base SQLite historique apres installation :
 

@@ -27,4 +27,5 @@ Utilise cette nouvelle entrée pour traiter le prompt.
 - En usage local Streamlit, tenir compte de la barre native Streamlit (`Deploy`, menu, contrôle de sidebar) qui peut recouvrir l'application ; la masquer ou l'abaisser si elle gêne l'interface.
 - Pour toute distribution serveur ou mise a jour, utiliser des versions explicites, executer une sauvegarde avant migration, controler un endpoint de sante apres redemarrage et prevoir un retour arriere verifiable.
 - Toute API ou integration d'agent doit reutiliser les regles metier de l'application, appliquer les droits cote serveur, journaliser les mutations et ne jamais exposer d'acces SQL generique.
+- Toute installation Proxmox doit installer et maintenir une commande systeme `update` fonctionnelle, reliee au script de mise a jour versionne du depot, puis verifier sa presence lors des tests d'installation et de mise a jour.
 - Pour tout module de gestion des risques, centraliser la cotation et les regles d'acceptation dans la couche metier, tracer chaque iteration et verification, et conserver des liens coherents vers les projets et leurs taches.

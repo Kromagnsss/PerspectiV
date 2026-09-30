@@ -38,58 +38,18 @@ function update_script() {
     exit 1
   fi
 
-  if check_for_gh_release "perspectiv" "Kromagnsss/PerspectiV"; then
-    timestamp=$(date +%Y%m%d_%H%M%S)
-    backup_dir="/var/lib/perspectiv/backups/${timestamp}"
-    mkdir -p "$backup_dir"
-    set -a
-    source /etc/perspectiv/perspectiv.env
-    set +a
-    pg_url="${PERSPECTIV_DATABASE_URL/postgresql+psycopg:/postgresql:}"
-    previous_release=$(readlink /opt/perspectiv/current)
-
-    msg_info "Backing up PerspectiV"
-    pg_dump --format=custom --file="$backup_dir/database.dump" "$pg_url"
-    cp /etc/perspectiv/perspectiv.env "$backup_dir/perspectiv.env"
-    msg_ok "Backed up PerspectiV"
-
-    msg_info "Stopping PerspectiV"
-    systemctl stop perspectiv-ui perspectiv-api
-    msg_ok "Stopped PerspectiV"
-
-    mv /opt/perspectiv "/opt/perspectiv-root-${timestamp}"
-    if ! CLEAN_INSTALL=1 fetch_and_deploy_gh_release "perspectiv" "Kromagnsss/PerspectiV" "tarball"; then
-      mv "/opt/perspectiv-root-${timestamp}" /opt/perspectiv
-      systemctl start perspectiv-api perspectiv-ui
-      msg_error "Release download failed; the previous release is still active"
-      exit 1
-    fi
-    mv /opt/perspectiv "/opt/perspectiv-release-${timestamp}"
-    mv "/opt/perspectiv-root-${timestamp}" /opt/perspectiv
-    mv "/opt/perspectiv-release-${timestamp}" "/opt/perspectiv/releases/${timestamp}"
-    ln -sfn "releases/${timestamp}" /opt/perspectiv/current
-    cd /opt/perspectiv/current
-    if uv sync --locked --no-editable --no-dev && .venv/bin/alembic upgrade head; then
-      install -m 0755 /opt/perspectiv/current/proxmox/scripts/perspectiv-update-check.sh /usr/local/sbin/perspectiv-update-check
-      systemctl start perspectiv-api perspectiv-ui
-      if curl -fsS --retry 12 --retry-delay 2 http://127.0.0.1:8000/health >/dev/null; then
-        find /var/lib/perspectiv/backups -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -nr | tail -n +8 | cut -d' ' -f2- | xargs -r rm -rf
-        find /opt/perspectiv/releases -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -nr | tail -n +5 | cut -d' ' -f2- | xargs -r rm -rf
-        msg_ok "Updated PerspectiV successfully"
-        exit 0
-      fi
-    fi
-
-    msg_error "PerspectiV health check failed; restoring the previous release"
-    systemctl stop perspectiv-ui perspectiv-api || true
-    ln -sfn "$previous_release" /opt/perspectiv/current
-    rm -rf "/opt/perspectiv/releases/${timestamp}"
-    pg_restore --clean --if-exists --no-owner --dbname="$pg_url" "$backup_dir/database.dump"
-    systemctl start perspectiv-api perspectiv-ui
-    curl -fsS --retry 12 --retry-delay 2 http://127.0.0.1:8000/health >/dev/null || msg_error "Rollback failed; restore $backup_dir manually"
-    exit 1
+  updater=/usr/local/sbin/perspectiv-update
+  if [[ ! -x "${updater}" ]]; then
+    msg_info "Installing PerspectiV updater"
+    curl -fsSL --retry 3 \
+      "https://raw.githubusercontent.com/Kromagnsss/PerspectiV/main/proxmox/scripts/perspectiv-update.sh" \
+      -o "${updater}"
+    chmod 0755 "${updater}"
+    ln -sfn "${updater}" /usr/bin/update
+    msg_ok "Installed PerspectiV updater"
   fi
-  exit 0
+
+  exec "${updater}" "$@"
 }
 
 start
