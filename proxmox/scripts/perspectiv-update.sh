@@ -12,15 +12,20 @@ FORCE=0
 CHECK_ONLY=0
 ALLOW_DOWNGRADE=0
 RESTORE_LATEST=0
+RESTORE_DIR=""
+LIST_BACKUPS=0
 
 usage() {
   cat <<'EOF'
-Usage: update [--check] [--force] [--allow-downgrade] [--restore-latest]
+Usage: update [--check] [--force] [--allow-downgrade]
+              [--list-backups] [--restore-latest] [--restore CHEMIN]
 
   --check  Affiche la version disponible sans modifier l'installation.
   --force  Reinstalle la derniere version meme si elle est deja active.
   --allow-downgrade  Autorise explicitement l'installation d'une version inferieure.
+  --list-backups     Liste les sauvegardes disponibles et leur release precedente.
   --restore-latest   Restaure la derniere sauvegarde et sa release precedente.
+  --restore CHEMIN   Restaure explicitement la sauvegarde indiquee.
 EOF
 }
 
@@ -32,7 +37,13 @@ while (($#)); do
     --check) CHECK_ONLY=1 ;;
     --force) FORCE=1 ;;
     --allow-downgrade) ALLOW_DOWNGRADE=1 ;;
+    --list-backups) LIST_BACKUPS=1 ;;
     --restore-latest) RESTORE_LATEST=1 ;;
+    --restore)
+      shift
+      [[ $# -gt 0 ]] || fail "--restore attend le chemin d'une sauvegarde."
+      RESTORE_DIR="$1"
+      ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; fail "Option inconnue: $1" ;;
   esac
@@ -85,6 +96,21 @@ restore_backup() {
   fi
   log "Restauration terminee avec succes."
 }
+
+if ((LIST_BACKUPS)); then
+  printf '%-32s %s\n' "SAUVEGARDE" "RELEASE PRECEDENTE"
+  while IFS= read -r backup_path; do
+    previous="inconnue"
+    [[ -f "${backup_path}/previous-release" ]] && previous="$(cat "${backup_path}/previous-release")"
+    printf '%-32s %s\n' "$(basename "${backup_path}")" "${previous}"
+  done < <(find "${BACKUP_ROOT}" -mindepth 1 -maxdepth 1 -type d -exec test -f '{}/database.dump' \; -print | sort)
+  exit 0
+fi
+
+if [[ -n "${RESTORE_DIR}" ]]; then
+  restore_backup "${RESTORE_DIR}"
+  exit 0
+fi
 
 if ((RESTORE_LATEST)); then
   latest_backup="$(find "${BACKUP_ROOT}" -mindepth 1 -maxdepth 1 -type d -exec test -f '{}/database.dump' \; -printf '%T@ %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)"
@@ -202,6 +228,7 @@ rollback() {
     log "Retour arriere termine."
   else
     printf '[PerspectiV] ERREUR: retour arriere incomplet; sauvegarde: %s\n' "${backup_dir}" >&2
+    journalctl -u perspectiv-api -u perspectiv-ui -n 100 --no-pager >&2 || true
   fi
   set -e
 }

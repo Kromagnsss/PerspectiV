@@ -11,6 +11,33 @@ depends_on = None
 
 
 def upgrade() -> None:
+    inspector = sa.inspect(op.get_bind())
+    expected_columns = {
+        "risk_assessments": {"id", "project_id", "reference", "title", "status", "standards", "acceptance_threshold"},
+        "risks": {"id", "assessment_id", "reference", "hazard", "initial_likelihood", "initial_consequence", "initial_level"},
+        "risk_iterations": {"id", "risk_id", "sequence", "treatment", "target_likelihood", "target_consequence", "target_level"},
+        "risk_iteration_tasks": {"id", "iteration_id", "task_id"},
+    }
+    existing_tables = set(inspector.get_table_names())
+    existing_risk_tables = set(expected_columns) & existing_tables
+    if existing_risk_tables == set(expected_columns):
+        invalid_tables = []
+        for table_name, required_columns in expected_columns.items():
+            actual_columns = {column["name"] for column in inspector.get_columns(table_name)}
+            if not required_columns <= actual_columns:
+                invalid_tables.append(table_name)
+        if invalid_tables:
+            raise RuntimeError(
+                "Schéma de risques existant mais incompatible : " + ", ".join(sorted(invalid_tables))
+            )
+        # Reprise d'une migration dont le DDL a été appliqué avant l'écriture de la révision Alembic.
+        return
+    if existing_risk_tables:
+        raise RuntimeError(
+            "Schéma de risques partiel détecté; restauration requise avant migration : "
+            + ", ".join(sorted(existing_risk_tables))
+        )
+
     op.create_table(
         "risk_assessments",
         sa.Column("id", sa.Integer(), primary_key=True),

@@ -107,6 +107,13 @@ L'updater refuse les downgrades implicites. En cas d'echec ayant laisse la base 
 update --restore-latest
 ```
 
+Pour inspecter les sauvegardes et restaurer une version anterieure precise :
+
+```bash
+update --list-backups
+update --restore /var/lib/perspectiv/backups/AAAAMMJJ_HHMMSS
+```
+
 L'option `--allow-downgrade` existe pour une intervention volontaire et controlee uniquement.
 
 Pour un conteneur PerspectiV installe avant l'ajout de cette commande, l'amorcer une seule fois :

@@ -38,8 +38,17 @@ def test_updater_refuses_implicit_downgrades_and_restores_clean_schema() -> None
     assert "archive_version" in updater
     assert "publication incoherente refusee" in updater
     assert "--restore-latest" in updater
+    assert "--list-backups" in updater
+    assert "--restore CHEMIN" in updater
     assert "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" in updater
     assert "pg_restore --exit-on-error" in updater
+
+
+def test_risk_migration_recovers_a_complete_unstamped_schema_only() -> None:
+    migration = (ROOT / "migrations/versions/20260930_0002_risk_management.py").read_text(encoding="utf-8")
+    assert "existing_risk_tables == set(expected_columns)" in migration
+    assert "required_columns <= actual_columns" in migration
+    assert "Schéma de risques partiel détecté" in migration
 
 
 def test_community_update_function_bootstraps_standalone_updater() -> None:
