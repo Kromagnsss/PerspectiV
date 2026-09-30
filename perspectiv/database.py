@@ -14,6 +14,10 @@ from .models import (
     BudgetLine,
     PlannedTimeEntry,
     Project,
+    Risk,
+    RiskAssessment,
+    RiskIteration,
+    RiskIterationTask,
     Task,
     TaskAssignment,
     TaskDependency,
@@ -229,6 +233,52 @@ def seed_demo(session: Session) -> None:
             TimeEntry(project_id=project.id, task_id=tasks[5].id, user_id=paul.id, entry_date=date(2026, 7, 16), hours=Decimal("4.00"), note="Modele entites"),
         ]
     )
+
+    assessment = RiskAssessment(
+        project_id=project.id,
+        reference="PRJ-001-RSK-01",
+        title="Analyse de risques de la refonte",
+        leader_id=benoit.id,
+        product_or_change="Application PerspectiV",
+        scope="Conception, développement, validation et déploiement local.",
+        assumptions="Cinq utilisateurs sur le réseau d'entreprise.",
+        applicable_requirements="Disponibilité, intégrité des données et traçabilité.",
+        acceptance_threshold="Low",
+        is_itns=False,
+        graded_approach_rationale="Approche proportionnée à un outil interne non lié à la sûreté.",
+    )
+    session.add(assessment)
+    session.flush()
+    risk = Risk(
+        assessment_id=assessment.id,
+        reference="PRJ-001-RSK-01-R001",
+        lifecycle_phase="Conception",
+        activity="Migration et stockage des données",
+        hazard="Perte ou altération de données projet",
+        cause="Migration incomplète ou sauvegarde indisponible",
+        potential_consequence="Perte de traçabilité et reconstitution manuelle des données.",
+        existing_controls="Sauvegarde avant migration et contrôle de santé après redémarrage.",
+        owner_id=benoit.id,
+        initial_likelihood="C",
+        initial_consequence=4,
+        initial_level="High",
+        acceptance_status="À statuer",
+    )
+    session.add(risk)
+    session.flush()
+    iteration = RiskIteration(
+        risk_id=risk.id,
+        sequence=1,
+        treatment="Tester la restauration automatique sur une copie de production.",
+        reduction_objective="Ramener la vraisemblance à improbable.",
+        additional_controls="Test de restauration et journal de migration.",
+        target_likelihood="D",
+        target_consequence=3,
+        target_level="Medium",
+    )
+    session.add(iteration)
+    session.flush()
+    session.add(RiskIterationTask(iteration_id=iteration.id, task_id=tasks[7].id))
 
     session.flush()
     recompute_actuals(session)

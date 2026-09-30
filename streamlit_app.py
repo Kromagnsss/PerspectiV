@@ -5,6 +5,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 from babel.numbers import format_currency
 try:
@@ -15,6 +16,7 @@ from st_aggrid import AgGrid, DataReturnMode, JsCode
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 
+from perspectiv.audit import record_audit
 from perspectiv.charts import (
     budget_bar,
     budget_pie,
@@ -27,7 +29,7 @@ from perspectiv.charts import (
     workload_bar,
 )
 from perspectiv.database import init_db, session_scope
-from perspectiv.models import User
+from perspectiv.models import Risk, RiskAssessment, RiskIteration, User
 from perspectiv.reports import build_project_pdf
 from perspectiv.settings import OIDC_ISSUER
 from perspectiv.services import (
@@ -57,6 +59,20 @@ from perspectiv.services import (
     planned_time_entries_df,
     project_options,
     projects_df,
+    create_risk,
+    create_risk_assessment,
+    create_risk_iteration,
+    decide_risk_acceptance,
+    risk_assessments_df,
+    risk_iterations_df,
+    risk_kpis,
+    risk_matrix_paths,
+    risks_df,
+    RISK_CONSEQUENCE_DEFINITIONS,
+    RISK_LIFECYCLE_PHASES,
+    RISK_LIKELIHOOD_DEFINITIONS,
+    RISK_MATRIX,
+    set_risk_assessment_status,
     starcost_hours_by_month_df,
     task_options,
     tasks_df,
@@ -67,6 +83,8 @@ from perspectiv.services import (
     update_budget_from_df,
     update_budget_lines_from_df,
     update_projects_from_df,
+    update_risk,
+    update_risk_assessment,
     update_planned_time_entries_from_df,
     update_tasks_from_df,
     update_time_entries_from_df,
@@ -74,6 +92,7 @@ from perspectiv.services import (
     update_users_from_df,
     user_name_options,
     user_options,
+    verify_risk_iteration,
     week_day_columns,
     week_start,
     weekly_planning_df,
@@ -109,6 +128,7 @@ PAGES = [
     "Timesheet",
     "Planification",
     "Budget",
+    "Gestion des risques",
     "Rapports PDF",
     "Utilisateurs",
 ]
@@ -120,6 +140,7 @@ PAGE_ICONS = {
     "Timesheet": ":material/schedule:",
     "Planification": ":material/event_available:",
     "Budget": ":material/account_balance_wallet:",
+    "Gestion des risques": ":material/health_and_safety:",
     "Rapports PDF": ":material/picture_as_pdf:",
     "Utilisateurs": ":material/group:",
 }
@@ -638,6 +659,14 @@ def delete_record_control(
         try:
             with session_scope() as session:
                 delete_record(session, entity, int(pending_id))
+                record_audit(
+                    session,
+                    actor_user_id=int(st.session_state["user"]["id"]),
+                    source="ui",
+                    action="delete",
+                    entity_type=entity,
+                    entity_id=int(pending_id),
+                )
             st.session_state.pop(f"{key}_pending_delete", None)
             st.success("Suppression effectuée.")
             st.rerun()
@@ -1957,6 +1986,7 @@ def show_dashboard() -> None:
         starcost_monthly = starcost_hours_by_month_df(session, project_id)
         completion_monthly = monthly_completion_df(session, project_id)
         deps = dependencies_df(session, project_id)
+        risk_metrics = risk_kpis(session, project_id)
 
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Projets", int(metrics["projects"]))
@@ -1964,6 +1994,11 @@ def show_dashboard() -> None:
     c3.metric("Avancement moyen", f"{metrics['progress']}%")
     c4.metric("Heures", f"{metrics['actual_hours']:.1f} / {metrics['planned_hours']:.1f}")
     c5.metric("Réel budget", eur(metrics["actual_budget"]))
+
+    r1, r2, r3 = st.columns(3)
+    r1.metric("Analyses de risques", risk_metrics["analyses"])
+    r2.metric("Risques High / Extreme", risk_metrics["high_or_extreme"])
+    r3.metric("Décisions de risques en attente", risk_metrics["pending_acceptance"])
 
     c5, c6 = st.columns(2)
     c5.plotly_chart(tasks_status_pie(task_data), use_container_width=True)
@@ -3070,6 +3105,375 @@ def show_budget() -> None:
     delete_record_control("budget_line", lines, ["Budget", "Catégorie", "Libellé"], f"budget_lines_{project_id}")
 
 
+def risk_matrix_figure(paths: list[dict]) -> go.Figure:
+    likelihoods = ["A", "B", "C", "D", "E"]
+    consequences = [1, 2, 3, 4, 5]
+    ranks = {"Low": 0, "Medium": 1, "High": 2, "Extreme": 3}
+    colors = ["#dcfce7", "#fef3c7", "#fed7aa", "#fecaca"]
+    z = [[ranks[RISK_MATRIX[likelihood][consequence - 1]] for consequence in consequences] for likelihood in likelihoods]
+    text_values = [[RISK_MATRIX[likelihood][consequence - 1] for consequence in consequences] for likelihood in likelihoods]
+    figure = go.Figure(
+        go.Heatmap(
+            x=consequences,
+            y=likelihoods,
+            z=z,
+            text=text_values,
+            texttemplate="%{text}",
+            hovertemplate="Vraisemblance %{y}<br>Conséquence %{x}<br>Niveau %{text}<extra></extra>",
+            colorscale=[
+                [0.00, colors[0]], [0.2499, colors[0]],
+                [0.25, colors[1]], [0.4999, colors[1]],
+                [0.50, colors[2]], [0.7499, colors[2]],
+                [0.75, colors[3]], [1.00, colors[3]],
+            ],
+            zmin=0,
+            zmax=3,
+            showscale=False,
+            xgap=2,
+            ygap=2,
+        )
+    )
+    for path in paths:
+        points = path["points"]
+        for index, point in enumerate(points):
+            figure.add_trace(
+                go.Scatter(
+                    x=[point["consequence"]],
+                    y=[point["likelihood"]],
+                    mode="markers+text" if index == 0 else "markers",
+                    text=[path["reference"]] if index == 0 else None,
+                    textposition="top center",
+                    marker={"size": 11, "color": "#0b2a59", "line": {"color": "white", "width": 2}},
+                    hovertemplate=f"{path['reference']}<br>{path['hazard']}<br>{point['kind']}<extra></extra>",
+                    showlegend=False,
+                )
+            )
+            if index:
+                previous = points[index - 1]
+                figure.add_annotation(
+                    x=point["consequence"], y=point["likelihood"],
+                    ax=previous["consequence"], ay=previous["likelihood"],
+                    xref="x", yref="y", axref="x", ayref="y",
+                    showarrow=True, arrowhead=3, arrowsize=1.2, arrowwidth=2, arrowcolor="#2563eb",
+                )
+        pending = path.get("pending_target")
+        if pending:
+            previous = points[-1]
+            figure.add_trace(
+                go.Scatter(
+                    x=[previous["consequence"], pending["consequence"]],
+                    y=[previous["likelihood"], pending["likelihood"]],
+                    mode="lines+markers",
+                    line={"color": "#64748b", "width": 2, "dash": "dot"},
+                    marker={"symbol": ["circle", "diamond-open"], "size": [1, 12]},
+                    hovertemplate="Cible non vérifiée<extra></extra>",
+                    showlegend=False,
+                )
+            )
+    figure.update_layout(
+        height=510,
+        margin={"l": 80, "r": 25, "t": 35, "b": 70},
+        plot_bgcolor="white",
+        xaxis={"title": "Conséquence", "tickmode": "array", "tickvals": consequences, "side": "bottom", "fixedrange": True},
+        yaxis={"title": "Vraisemblance", "categoryorder": "array", "categoryarray": list(reversed(likelihoods)), "fixedrange": True},
+    )
+    return figure
+
+
+def _option_label(options: dict[str, int], selected_id: int | None) -> str | None:
+    return next((label for label, value in options.items() if value == selected_id), None)
+
+
+def show_risks() -> None:
+    header = sticky_page_header("risks")
+    with header:
+        title_col, project_col, analysis_col = st.columns([1.0, 1.4, 2.2], vertical_alignment="center")
+        with title_col:
+            sticky_header_title("Gestion des risques")
+        with project_col:
+            project_id = select_project()
+        with session_scope() as session:
+            header_assessments = risk_assessments_df(session, project_id) if project_id else pd.DataFrame()
+        assessment_options = {
+            f"{row['Référence']} - {row['Analyse']}": int(row["ID"])
+            for row in header_assessments.to_dict("records")
+        }
+        with analysis_col:
+            selected_labels = st.multiselect(
+                "Analyses",
+                list(assessment_options),
+                default=list(assessment_options),
+                key=f"risk_analysis_filter_{project_id}",
+                placeholder="Toutes les analyses",
+            )
+    if not project_id:
+        return
+
+    selected_ids = [assessment_options[label] for label in selected_labels]
+    with session_scope() as session:
+        project = get_project(session, project_id)
+        users = user_options(session)
+        tasks = task_options(session, project_id)
+        assessments = risk_assessments_df(session, project_id)
+        risks = risks_df(session, selected_ids)
+        paths = risk_matrix_paths(session, selected_ids)
+        metrics = risk_kpis(session, project_id)
+
+    can_manage_risks = st.session_state["user"]["role"] in {"manager", "admin"}
+    if not can_manage_risks:
+        st.info("Lecture seule : la modification des analyses de risques est réservée aux managers et administrateurs.")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Analyses", metrics["analyses"])
+        c2.metric("Risques", len(risks))
+        c3.metric("High / Extreme", sum(level in {"High", "Extreme"} for level in risks.get("Niveau courant", [])))
+        c4.metric("À statuer", sum(value == "À statuer" for value in risks.get("Acceptation", [])))
+        st.subheader("Matrice des risques")
+        st.plotly_chart(risk_matrix_figure(paths), use_container_width=True, config={"displaylogo": False})
+        st.subheader("Registre des risques")
+        if risks.empty:
+            st.info("Aucun risque dans les analyses sélectionnées.")
+        else:
+            st.dataframe(risks.drop(columns=["ID", "Analyse ID"], errors="ignore"), use_container_width=True, hide_index=True)
+        return
+
+    with st.expander("Créer une analyse de risques", expanded=assessments.empty):
+        with st.form(f"risk_assessment_create_{project_id}"):
+            c1, c2, c3 = st.columns([2, 1, 1])
+            analysis_title = c1.text_input("Titre de l'analyse")
+            leader_label = c2.selectbox("Responsable", [""] + list(users))
+            threshold = c3.selectbox("Seuil d'acceptation", ["Low", "Medium", "High", "Extreme"])
+            product_or_change = st.text_input("Produit ou modification concernée")
+            scope = st.text_area("Périmètre")
+            c4, c5 = st.columns(2)
+            assumptions = c4.text_area("Hypothèses")
+            requirements = c5.text_area("Exigences applicables")
+            c6, c7 = st.columns([1, 2])
+            is_itns = c6.checkbox("ITNS")
+            safety = c6.selectbox("Importance pour la sûreté", ["Non applicable", "Faible", "Modérée", "Élevée"])
+            graded = c7.text_area("Justification de l'approche graduée")
+            st.caption("Référentiel : ISO 9001:2026 · ISO 29001:2020 · ISO 19443:2018")
+            create_assessment = st.form_submit_button("Créer l'analyse", type="primary")
+        if create_assessment:
+            try:
+                with session_scope() as session:
+                    created = create_risk_assessment(
+                        session, project_id, analysis_title, users.get(leader_label), product_or_change,
+                        scope, assumptions, requirements, threshold, is_itns, safety, graded,
+                    )
+                    record_audit(session, actor_user_id=int(st.session_state["user"]["id"]), source="ui", action="create", entity_type="risk_assessment", entity_id=created.id, after=created)
+                st.success(f"Analyse créée : {created.reference}")
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Analyses", metrics["analyses"])
+    c2.metric("Risques", len(risks))
+    c3.metric("High / Extreme", sum(level in {"High", "Extreme"} for level in risks.get("Niveau courant", [])))
+    c4.metric("À statuer", sum(value == "À statuer" for value in risks.get("Acceptation", [])))
+
+    st.subheader("Matrice des risques")
+    st.plotly_chart(risk_matrix_figure(paths), use_container_width=True, config={"displaylogo": False})
+    st.caption("Trait plein : cotation résiduelle vérifiée. Trait pointillé et losange : cible en attente de vérification.")
+
+    registry_tab, iterations_tab, analyses_tab = st.tabs(["Registre des risques", "Itérations et actions", "Analyses"])
+    with registry_tab:
+        if not selected_ids:
+            st.info("Sélectionnez au moins une analyse dans le bandeau.")
+        else:
+            with st.expander("Ajouter un risque", expanded=risks.empty):
+                with st.form(f"risk_create_{project_id}"):
+                    c1, c2, c3 = st.columns([1.5, 1.2, 1.2])
+                    target_analysis = c1.selectbox("Analyse", selected_labels)
+                    phase = c2.selectbox("Phase du cycle de vie", RISK_LIFECYCLE_PHASES)
+                    owner_label = c3.selectbox("Responsable du risque", [""] + list(users))
+                    activity = st.text_input("Activité / fonction")
+                    c4, c5 = st.columns(2)
+                    hazard = c4.text_area("Danger / événement redouté")
+                    cause = c5.text_area("Cause")
+                    c6, c7 = st.columns(2)
+                    consequence_text = c6.text_area("Conséquence potentielle")
+                    controls = c7.text_area("Maîtrises existantes")
+                    c8, c9 = st.columns(2)
+                    likelihood = c8.selectbox("Vraisemblance initiale", list(RISK_LIKELIHOOD_DEFINITIONS), format_func=lambda value: f"{value} - {RISK_LIKELIHOOD_DEFINITIONS[value]}")
+                    consequence = c9.selectbox("Conséquence initiale", list(RISK_CONSEQUENCE_DEFINITIONS), format_func=lambda value: f"{value} - {RISK_CONSEQUENCE_DEFINITIONS[value]}")
+                    create_risk_clicked = st.form_submit_button("Ajouter le risque", type="primary")
+                if create_risk_clicked:
+                    try:
+                        with session_scope() as session:
+                            created = create_risk(
+                                session, assessment_options[target_analysis], phase, activity, hazard, cause,
+                                consequence_text, controls, users.get(owner_label), likelihood, consequence,
+                            )
+                            record_audit(session, actor_user_id=int(st.session_state["user"]["id"]), source="ui", action="create", entity_type="risk", entity_id=created.id, after=created)
+                        st.success(f"Risque créé : {created.reference}")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(str(exc))
+
+            if risks.empty:
+                st.info("Aucun risque dans les analyses sélectionnées.")
+            else:
+                visible = grid_column_visibility_selector(
+                    "risks_grid", list(risks.columns),
+                    required_columns=["Référence", "Danger", "Niveau courant", "Acceptation"],
+                    technical_columns={"ID", "Analyse ID"},
+                )
+                st.dataframe(risks, use_container_width=True, hide_index=True, column_order=visible_columns_for_editor(risks, visible))
+                risk_labels = {f"{row['Référence']} - {row['Danger']}": int(row["ID"]) for row in risks.to_dict("records")}
+                edit_label = st.selectbox("Risque à modifier", list(risk_labels), key="risk_edit_select")
+                edit_id = risk_labels[edit_label]
+                with session_scope() as session:
+                    item = session.get(Risk, edit_id)
+                    owner_id = item.owner_id
+                    values = {
+                        "phase": item.lifecycle_phase, "activity": item.activity, "hazard": item.hazard,
+                        "cause": item.cause or "", "consequence": item.potential_consequence,
+                        "controls": item.existing_controls or "", "likelihood": item.initial_likelihood,
+                        "severity": item.initial_consequence,
+                    }
+                with st.expander("Modifier le risque"):
+                    with st.form(f"risk_edit_{edit_id}"):
+                        ec1, ec2, ec3 = st.columns(3)
+                        ephase = ec1.selectbox("Phase", RISK_LIFECYCLE_PHASES, index=RISK_LIFECYCLE_PHASES.index(values["phase"]) if values["phase"] in RISK_LIFECYCLE_PHASES else 0)
+                        eowner = ec2.selectbox("Responsable", [""] + list(users), index=([""] + list(users)).index(_option_label(users, owner_id)) if _option_label(users, owner_id) else 0)
+                        eactivity = ec3.text_input("Activité", values["activity"])
+                        ehazard = st.text_area("Danger", values["hazard"])
+                        ecause = st.text_area("Cause", values["cause"])
+                        econsequence = st.text_area("Conséquence potentielle", values["consequence"])
+                        econtrols = st.text_area("Maîtrises existantes", values["controls"])
+                        ec4, ec5 = st.columns(2)
+                        elikelihood = ec4.selectbox("Vraisemblance initiale", list(RISK_LIKELIHOOD_DEFINITIONS), index=list(RISK_LIKELIHOOD_DEFINITIONS).index(values["likelihood"]))
+                        eseverity = ec5.selectbox("Conséquence initiale", list(RISK_CONSEQUENCE_DEFINITIONS), index=list(RISK_CONSEQUENCE_DEFINITIONS).index(values["severity"]))
+                        save_risk = st.form_submit_button("Enregistrer", type="primary")
+                    if save_risk:
+                        try:
+                            with session_scope() as session:
+                                updated = update_risk(session, edit_id, lifecycle_phase=ephase, owner_id=users.get(eowner), activity=eactivity, hazard=ehazard, cause=ecause, potential_consequence=econsequence, existing_controls=econtrols, initial_likelihood=elikelihood, initial_consequence=eseverity)
+                                record_audit(session, actor_user_id=int(st.session_state["user"]["id"]), source="ui", action="update", entity_type="risk", entity_id=updated.id, after=updated)
+                            st.success("Risque mis à jour.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(str(exc))
+                delete_record_control("risk", risks, ["Référence", "Danger"], f"risks_{project_id}")
+
+    with iterations_tab:
+        if risks.empty:
+            st.info("Créez d'abord un risque.")
+        else:
+            risk_labels = {f"{row['Référence']} - {row['Danger']}": int(row["ID"]) for row in risks.to_dict("records")}
+            selected_risk_label = st.selectbox("Risque", list(risk_labels), key="risk_iteration_risk")
+            risk_id = risk_labels[selected_risk_label]
+            with session_scope() as session:
+                iterations = risk_iterations_df(session, risk_id)
+            with st.expander("Ajouter une itération de réduction", expanded=iterations.empty):
+                with st.form(f"risk_iteration_create_{risk_id}"):
+                    treatment = st.text_area("Traitement décidé")
+                    c1, c2 = st.columns(2)
+                    objective = c1.text_area("Objectif de réduction")
+                    added_controls = c2.text_area("Maîtrises supplémentaires")
+                    contingency = st.text_area("Plan de contingence")
+                    action_labels = st.multiselect("Actions du projet", list(tasks))
+                    c3, c4 = st.columns(2)
+                    target_likelihood = c3.selectbox("Vraisemblance cible", list(RISK_LIKELIHOOD_DEFINITIONS))
+                    target_consequence = c4.selectbox("Conséquence cible", list(RISK_CONSEQUENCE_DEFINITIONS))
+                    add_iteration = st.form_submit_button("Ajouter l'itération", type="primary")
+                if add_iteration:
+                    try:
+                        with session_scope() as session:
+                            created = create_risk_iteration(session, risk_id, treatment, objective, added_controls, contingency, target_likelihood, target_consequence, [tasks[label] for label in action_labels])
+                            record_audit(session, actor_user_id=int(st.session_state["user"]["id"]), source="ui", action="create", entity_type="risk_iteration", entity_id=created.id, after=created)
+                        st.success("Itération ajoutée.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(str(exc))
+            if not iterations.empty:
+                st.dataframe(iterations, use_container_width=True, hide_index=True)
+                pending_rows = iterations[iterations["Statut vérification"] != "Vérifiée"]
+                if not pending_rows.empty:
+                    verify_options = {f"Itération {row['Itération']} - {row['Cible']}": int(row["ID"]) for row in pending_rows.to_dict("records")}
+                    with st.expander("Vérifier une cotation résiduelle"):
+                        with st.form(f"risk_verify_{risk_id}"):
+                            verify_label = st.selectbox("Itération", list(verify_options))
+                            vc1, vc2 = st.columns(2)
+                            verified_likelihood = vc1.selectbox("Vraisemblance constatée", list(RISK_LIKELIHOOD_DEFINITIONS))
+                            verified_consequence = vc2.selectbox("Conséquence constatée", list(RISK_CONSEQUENCE_DEFINITIONS))
+                            evidence = st.text_area("Preuve de vérification")
+                            verify_clicked = st.form_submit_button("Valider la cotation résiduelle", type="primary")
+                        if verify_clicked:
+                            try:
+                                with session_scope() as session:
+                                    verified = verify_risk_iteration(session, verify_options[verify_label], verified_likelihood, verified_consequence, evidence, int(st.session_state["user"]["id"]))
+                                    record_audit(session, actor_user_id=int(st.session_state["user"]["id"]), source="ui", action="verify", entity_type="risk_iteration", entity_id=verified.id, after=verified)
+                                st.success("Cotation résiduelle vérifiée et rendue officielle.")
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(str(exc))
+                with st.expander("Décision d'acceptation"):
+                    with st.form(f"risk_accept_{risk_id}"):
+                        decision = st.selectbox("Décision", ["À statuer", "Accepté", "Non accepté", "Accepté par dérogation"])
+                        justification = st.text_area("Justification")
+                        decide_clicked = st.form_submit_button("Enregistrer la décision", type="primary")
+                    if decide_clicked:
+                        try:
+                            with session_scope() as session:
+                                decided = decide_risk_acceptance(session, risk_id, decision, justification, int(st.session_state["user"]["id"]))
+                                record_audit(session, actor_user_id=int(st.session_state["user"]["id"]), source="ui", action="acceptance", entity_type="risk", entity_id=decided.id, after=decided)
+                            st.success("Décision enregistrée.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(str(exc))
+                delete_record_control("risk_iteration", iterations, ["Itération", "Traitement"], f"risk_iterations_{risk_id}")
+
+    with analyses_tab:
+        if assessments.empty:
+            st.info("Aucune analyse pour ce projet.")
+        else:
+            st.dataframe(assessments, use_container_width=True, hide_index=True)
+            analysis_labels = {f"{row['Référence']} - {row['Analyse']}": int(row["ID"]) for row in assessments.to_dict("records")}
+            selected_analysis_label = st.selectbox("Analyse à modifier", list(analysis_labels), key="risk_assessment_edit_select")
+            assessment_id = analysis_labels[selected_analysis_label]
+            with session_scope() as session:
+                item = session.get(RiskAssessment, assessment_id)
+                assessment_values = {
+                    "title": item.title, "leader_id": item.leader_id, "product": item.product_or_change or "",
+                    "scope": item.scope or "", "assumptions": item.assumptions or "",
+                    "requirements": item.applicable_requirements or "", "threshold": item.acceptance_threshold,
+                    "itns": item.is_itns, "safety": item.safety_importance, "graded": item.graded_approach_rationale or "",
+                    "status": item.status,
+                }
+            with st.expander("Modifier ou clôturer l'analyse"):
+                with st.form(f"risk_assessment_edit_{assessment_id}"):
+                    ac1, ac2, ac3 = st.columns([2, 1, 1])
+                    atitle = ac1.text_input("Titre", assessment_values["title"])
+                    aleader = ac2.selectbox("Responsable", [""] + list(users), index=([""] + list(users)).index(_option_label(users, assessment_values["leader_id"])) if _option_label(users, assessment_values["leader_id"]) else 0)
+                    athreshold = ac3.selectbox("Seuil", ["Low", "Medium", "High", "Extreme"], index=["Low", "Medium", "High", "Extreme"].index(assessment_values["threshold"]))
+                    aproduct = st.text_input("Produit ou modification", assessment_values["product"])
+                    ascope = st.text_area("Périmètre", assessment_values["scope"])
+                    aa1, aa2 = st.columns(2)
+                    aassumptions = aa1.text_area("Hypothèses", assessment_values["assumptions"])
+                    arequirements = aa2.text_area("Exigences applicables", assessment_values["requirements"])
+                    aitns = st.checkbox("ITNS", value=assessment_values["itns"])
+                    asafety = st.selectbox("Importance pour la sûreté", ["Non applicable", "Faible", "Modérée", "Élevée"], index=["Non applicable", "Faible", "Modérée", "Élevée"].index(assessment_values["safety"]) if assessment_values["safety"] in ["Non applicable", "Faible", "Modérée", "Élevée"] else 0)
+                    agrade = st.text_area("Approche graduée", assessment_values["graded"])
+                    astatus = st.selectbox("Statut", ["Ouverte", "Clôturée"], index=["Ouverte", "Clôturée"].index(assessment_values["status"]))
+                    save_analysis = st.form_submit_button("Enregistrer", type="primary")
+                if save_analysis:
+                    try:
+                        with session_scope() as session:
+                            current = session.get(RiskAssessment, assessment_id)
+                            if current.status == "Clôturée" and astatus == "Ouverte":
+                                set_risk_assessment_status(session, assessment_id, "Ouverte")
+                            update_risk_assessment(session, assessment_id, title=atitle, leader_id=users.get(aleader), product_or_change=aproduct, scope=ascope, assumptions=aassumptions, applicable_requirements=arequirements, acceptance_threshold=athreshold, is_itns=aitns, safety_importance=asafety, graded_approach_rationale=agrade)
+                            updated = set_risk_assessment_status(session, assessment_id, astatus)
+                            record_audit(session, actor_user_id=int(st.session_state["user"]["id"]), source="ui", action="update", entity_type="risk_assessment", entity_id=updated.id, after=updated)
+                        st.success("Analyse mise à jour.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(str(exc))
+            delete_record_control("risk_assessment", assessments, ["Référence", "Analyse"], f"risk_assessments_{project_id}")
+
+
 def show_reports() -> None:
     header = sticky_page_header("reports")
     with header:
@@ -3086,9 +3490,11 @@ def show_reports() -> None:
         metrics = kpis(session, project_id)
         task_data = tasks_df(session, project_id)
         budget_data = budget_df(session, project_id)
-    st.write("Génère un PDF synthétique avec KPI, tâches principales et budget.")
+        assessment_data = risk_assessments_df(session, project_id)
+        risk_data = risks_df(session, assessment_data["ID"].astype(int).tolist()) if not assessment_data.empty else pd.DataFrame()
+    st.write("Génère un PDF synthétique avec KPI, tâches principales, budget et risques.")
     if st.button("Générer le PDF", type="primary"):
-        output = build_project_pdf(project_label, metrics, task_data, budget_data)
+        output = build_project_pdf(project_label, metrics, task_data, budget_data, risk_data)
         st.success(f"Rapport généré : {output.name}")
         st.download_button(
             "Télécharger",
@@ -3210,6 +3616,8 @@ def main() -> None:
         show_planning()
     elif page == "Budget":
         show_budget()
+    elif page == "Gestion des risques":
+        show_risks()
     elif page == "Rapports PDF":
         show_reports()
     elif page == "Utilisateurs":

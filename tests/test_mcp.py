@@ -22,6 +22,12 @@ def test_mcp_tools_are_discoverable() -> None:
                 "update_project",
                 "save_timesheet_week",
                 "save_planning_week",
+                "list_project_risks",
+                "create_risk_analysis",
+                "create_project_risk",
+                "add_risk_reduction_iteration",
+                "verify_risk_reduction",
+                "decide_risk",
                 "preview_deletion",
                 "confirm_deletion",
             } <= names

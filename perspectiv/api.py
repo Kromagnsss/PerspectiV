@@ -29,6 +29,9 @@ from .models import (
     IdempotencyRecord,
     PlannedTimeEntry,
     Project,
+    Risk,
+    RiskAssessment,
+    RiskIteration,
     Task,
     TaskAssignment,
     TaskDependency,
@@ -49,6 +52,14 @@ from .schemas import (
     Page,
     ProjectCreate,
     ProjectPatch,
+    RiskAcceptance,
+    RiskAssessmentCreate,
+    RiskAssessmentPatch,
+    RiskAssessmentStatus,
+    RiskCreate,
+    RiskIterationCreate,
+    RiskIterationVerify,
+    RiskPatch,
     TaskCreate,
     TaskPatch,
     UserCreate,
@@ -62,17 +73,27 @@ from .services import (
     add_dependency,
     budget_df,
     create_project,
+    create_risk,
+    create_risk_assessment,
+    create_risk_iteration,
     create_task,
     create_user,
     delete_record,
     deletion_preview,
     ensure_direct_time_task,
     kpis,
+    decide_risk_acceptance,
+    risk_matrix_paths,
+    risks_df,
+    set_risk_assessment_status,
     recompute_actuals,
     save_weekly_planning,
     save_weekly_timesheet,
     tasks_df,
+    update_risk,
+    update_risk_assessment,
     validate_task_tree,
+    verify_risk_iteration,
     week_day_columns,
     week_start,
 )
@@ -357,6 +378,111 @@ def patch_budget_line(line_id: int, payload: BudgetLinePatch, principal: Current
     return model_dict(line)
 
 
+@app.get("/api/v1/projects/{project_id}/risk-assessments", response_model=Page, tags=["risks"])
+def list_risk_assessments(project_id: int, principal: CurrentPrincipal, session: Session = Depends(get_session), limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)) -> Page:
+    require_scope(principal, "read")
+    total = session.scalar(select(func.count(RiskAssessment.id)).where(RiskAssessment.project_id == project_id)) or 0
+    items = session.scalars(select(RiskAssessment).where(RiskAssessment.project_id == project_id).order_by(RiskAssessment.reference).offset(offset).limit(limit)).all()
+    return page(items, total, limit, offset)
+
+
+@app.post("/api/v1/projects/{project_id}/risk-assessments", tags=["risks"], status_code=201)
+def post_risk_assessment(project_id: int, payload: RiskAssessmentCreate, principal: CurrentPrincipal, session: Session = Depends(get_session)) -> dict:
+    require_manager(principal)
+    require_scope(principal, "projects:write")
+    item = create_risk_assessment(session, project_id=project_id, **payload.model_dump())
+    record_audit(session, actor_user_id=principal.user_id, source="api", action="create", entity_type="risk_assessment", entity_id=item.id, after=item)
+    return model_dict(item)
+
+
+@app.patch("/api/v1/risk-assessments/{assessment_id}", tags=["risks"])
+def patch_risk_assessment(assessment_id: int, payload: RiskAssessmentPatch, principal: CurrentPrincipal, session: Session = Depends(get_session)) -> dict:
+    require_manager(principal)
+    require_scope(principal, "projects:write")
+    existing = get_or_404(session, RiskAssessment, assessment_id, "Analyse de risques")
+    before = model_dict(existing)
+    item = update_risk_assessment(session, assessment_id, **payload.model_dump(exclude_unset=True))
+    record_audit(session, actor_user_id=principal.user_id, source="api", action="update", entity_type="risk_assessment", entity_id=item.id, before=before, after=item)
+    return model_dict(item)
+
+
+@app.post("/api/v1/risk-assessments/{assessment_id}/status", tags=["risks"])
+def change_risk_assessment_status(assessment_id: int, payload: RiskAssessmentStatus, principal: CurrentPrincipal, session: Session = Depends(get_session)) -> dict:
+    require_manager(principal)
+    require_scope(principal, "projects:write")
+    existing = get_or_404(session, RiskAssessment, assessment_id, "Analyse de risques")
+    before = model_dict(existing)
+    item = set_risk_assessment_status(session, assessment_id, payload.status)
+    record_audit(session, actor_user_id=principal.user_id, source="api", action="status", entity_type="risk_assessment", entity_id=item.id, before=before, after=item)
+    return model_dict(item)
+
+
+@app.get("/api/v1/risk-assessments/{assessment_id}/risks", response_model=Page, tags=["risks"])
+def list_risks(assessment_id: int, principal: CurrentPrincipal, session: Session = Depends(get_session), limit: int = Query(250, ge=1, le=1000), offset: int = Query(0, ge=0)) -> Page:
+    require_scope(principal, "read")
+    total = session.scalar(select(func.count(Risk.id)).where(Risk.assessment_id == assessment_id)) or 0
+    items = session.scalars(select(Risk).where(Risk.assessment_id == assessment_id).order_by(Risk.reference).offset(offset).limit(limit)).all()
+    return page(items, total, limit, offset)
+
+
+@app.get("/api/v1/risk-assessments/{assessment_id}/matrix", tags=["risks"])
+def get_risk_matrix(assessment_id: int, principal: CurrentPrincipal, session: Session = Depends(get_session)) -> dict:
+    require_scope(principal, "read")
+    get_or_404(session, RiskAssessment, assessment_id, "Analyse de risques")
+    return {"paths": risk_matrix_paths(session, [assessment_id])}
+
+
+@app.post("/api/v1/risk-assessments/{assessment_id}/risks", tags=["risks"], status_code=201)
+def post_risk(assessment_id: int, payload: RiskCreate, principal: CurrentPrincipal, session: Session = Depends(get_session)) -> dict:
+    require_manager(principal)
+    require_scope(principal, "projects:write")
+    item = create_risk(session, assessment_id=assessment_id, **payload.model_dump())
+    record_audit(session, actor_user_id=principal.user_id, source="api", action="create", entity_type="risk", entity_id=item.id, after=item)
+    return model_dict(item)
+
+
+@app.patch("/api/v1/risks/{risk_id}", tags=["risks"])
+def patch_risk(risk_id: int, payload: RiskPatch, principal: CurrentPrincipal, session: Session = Depends(get_session)) -> dict:
+    require_manager(principal)
+    require_scope(principal, "projects:write")
+    existing = get_or_404(session, Risk, risk_id, "Risque")
+    before = model_dict(existing)
+    item = update_risk(session, risk_id, **payload.model_dump(exclude_unset=True))
+    record_audit(session, actor_user_id=principal.user_id, source="api", action="update", entity_type="risk", entity_id=item.id, before=before, after=item)
+    return model_dict(item)
+
+
+@app.post("/api/v1/risks/{risk_id}/iterations", tags=["risks"], status_code=201)
+def post_risk_iteration(risk_id: int, payload: RiskIterationCreate, principal: CurrentPrincipal, session: Session = Depends(get_session)) -> dict:
+    require_manager(principal)
+    require_scope(principal, "projects:write")
+    item = create_risk_iteration(session, risk_id=risk_id, **payload.model_dump())
+    record_audit(session, actor_user_id=principal.user_id, source="api", action="create", entity_type="risk_iteration", entity_id=item.id, after=item)
+    return model_dict(item)
+
+
+@app.post("/api/v1/risk-iterations/{iteration_id}/verify", tags=["risks"])
+def verify_iteration(iteration_id: int, payload: RiskIterationVerify, principal: CurrentPrincipal, session: Session = Depends(get_session)) -> dict:
+    require_manager(principal)
+    require_scope(principal, "projects:write")
+    existing = get_or_404(session, RiskIteration, iteration_id, "Itération")
+    before = model_dict(existing)
+    item = verify_risk_iteration(session, iteration_id, payload.likelihood, payload.consequence, payload.evidence, principal.user_id)
+    record_audit(session, actor_user_id=principal.user_id, source="api", action="verify", entity_type="risk_iteration", entity_id=item.id, before=before, after=item)
+    return model_dict(item)
+
+
+@app.post("/api/v1/risks/{risk_id}/acceptance", tags=["risks"])
+def decide_acceptance(risk_id: int, payload: RiskAcceptance, principal: CurrentPrincipal, session: Session = Depends(get_session)) -> dict:
+    require_manager(principal)
+    require_scope(principal, "projects:write")
+    existing = get_or_404(session, Risk, risk_id, "Risque")
+    before = model_dict(existing)
+    item = decide_risk_acceptance(session, risk_id, payload.decision, payload.justification, principal.user_id)
+    record_audit(session, actor_user_id=principal.user_id, source="api", action="acceptance", entity_type="risk", entity_id=item.id, before=before, after=item)
+    return model_dict(item)
+
+
 @app.post("/api/v1/assignments", tags=["projects"], status_code=201)
 def post_assignment(payload: AssignmentCreate, principal: CurrentPrincipal, session: Session = Depends(get_session)) -> dict:
     require_manager(principal)
@@ -493,7 +619,14 @@ def project_kpis(project_id: int, principal: CurrentPrincipal, session: Session 
 def project_report(project_id: int, principal: CurrentPrincipal, session: Session = Depends(get_session)) -> FileResponse:
     require_scope(principal, "read")
     project = get_or_404(session, Project, project_id, "Projet")
-    output = build_project_pdf(f"{project.code} - {project.name}", kpis(session, project_id), tasks_df(session, project_id), budget_df(session, project_id))
+    assessment_ids = session.scalars(select(RiskAssessment.id).where(RiskAssessment.project_id == project_id)).all()
+    output = build_project_pdf(
+        f"{project.code} - {project.name}",
+        kpis(session, project_id),
+        tasks_df(session, project_id),
+        budget_df(session, project_id),
+        risks_df(session, assessment_ids),
+    )
     record_audit(session, actor_user_id=principal.user_id, source="api", action="generate", entity_type="report", entity_id=project_id)
     return FileResponse(Path(output), media_type="application/pdf", filename=Path(output).name)
 

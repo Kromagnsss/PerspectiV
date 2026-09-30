@@ -69,6 +69,9 @@ class Project(Base):
     )
     budgets: Mapped[list["Budget"]] = relationship(back_populates="project", cascade="all, delete-orphan")
     budget_lines: Mapped[list["BudgetLine"]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    risk_assessments: Mapped[list["RiskAssessment"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
 
 
 class Task(Base):
@@ -204,6 +207,109 @@ class BudgetLine(Base):
     project: Mapped[Project] = relationship(back_populates="budget_lines")
     budget: Mapped[Budget | None] = relationship(back_populates="lines")
     tasks: Mapped[list[Task]] = relationship(back_populates="budget_line")
+
+
+class RiskAssessment(Base):
+    __tablename__ = "risk_assessments"
+    __table_args__ = (UniqueConstraint("project_id", "reference", name="uq_project_risk_assessment_reference"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
+    reference: Mapped[str] = mapped_column(String(48), unique=True, index=True)
+    title: Mapped[str] = mapped_column(String(220))
+    status: Mapped[str] = mapped_column(String(24), default="Ouverte")
+    product_or_change: Mapped[str | None] = mapped_column(Text)
+    scope: Mapped[str | None] = mapped_column(Text)
+    assumptions: Mapped[str | None] = mapped_column(Text)
+    applicable_requirements: Mapped[str | None] = mapped_column(Text)
+    standards: Mapped[str] = mapped_column(
+        Text, default="ISO 9001:2026; ISO 29001:2020; ISO 19443:2018"
+    )
+    acceptance_threshold: Mapped[str] = mapped_column(String(16), default="Low")
+    leader_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)
+    is_itns: Mapped[bool] = mapped_column(Boolean, default=False)
+    safety_importance: Mapped[str] = mapped_column(String(32), default="Non applicable")
+    graded_approach_rationale: Mapped[str | None] = mapped_column(Text)
+    start_date: Mapped[date] = mapped_column(Date, default=date.today)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    project: Mapped[Project] = relationship(back_populates="risk_assessments")
+    leader: Mapped[User | None] = relationship(foreign_keys=[leader_id])
+    risks: Mapped[list["Risk"]] = relationship(back_populates="assessment", cascade="all, delete-orphan")
+
+
+class Risk(Base):
+    __tablename__ = "risks"
+    __table_args__ = (UniqueConstraint("assessment_id", "reference", name="uq_assessment_risk_reference"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    assessment_id: Mapped[int] = mapped_column(ForeignKey("risk_assessments.id"), index=True)
+    reference: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    lifecycle_phase: Mapped[str] = mapped_column(String(80), default="Conception")
+    activity: Mapped[str] = mapped_column(String(220))
+    hazard: Mapped[str] = mapped_column(String(220))
+    cause: Mapped[str | None] = mapped_column(Text)
+    potential_consequence: Mapped[str] = mapped_column(Text)
+    existing_controls: Mapped[str | None] = mapped_column(Text)
+    owner_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)
+    initial_likelihood: Mapped[str] = mapped_column(String(1))
+    initial_consequence: Mapped[int] = mapped_column(Integer)
+    initial_level: Mapped[str] = mapped_column(String(16))
+    acceptance_status: Mapped[str] = mapped_column(String(32), default="À statuer")
+    acceptance_justification: Mapped[str | None] = mapped_column(Text)
+    acceptance_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)
+    acceptance_date: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    assessment: Mapped[RiskAssessment] = relationship(back_populates="risks")
+    owner: Mapped[User | None] = relationship(foreign_keys=[owner_id])
+    acceptance_user: Mapped[User | None] = relationship(foreign_keys=[acceptance_user_id])
+    iterations: Mapped[list["RiskIteration"]] = relationship(
+        back_populates="risk", cascade="all, delete-orphan", order_by="RiskIteration.sequence"
+    )
+
+
+class RiskIteration(Base):
+    __tablename__ = "risk_iterations"
+    __table_args__ = (UniqueConstraint("risk_id", "sequence", name="uq_risk_iteration_sequence"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    risk_id: Mapped[int] = mapped_column(ForeignKey("risks.id"), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    treatment: Mapped[str] = mapped_column(Text)
+    reduction_objective: Mapped[str | None] = mapped_column(Text)
+    additional_controls: Mapped[str | None] = mapped_column(Text)
+    contingency_plan: Mapped[str | None] = mapped_column(Text)
+    target_likelihood: Mapped[str] = mapped_column(String(1))
+    target_consequence: Mapped[int] = mapped_column(Integer)
+    target_level: Mapped[str] = mapped_column(String(16))
+    verification_status: Mapped[str] = mapped_column(String(32), default="À vérifier")
+    verified_likelihood: Mapped[str | None] = mapped_column(String(1))
+    verified_consequence: Mapped[int | None] = mapped_column(Integer)
+    verified_level: Mapped[str | None] = mapped_column(String(16))
+    verification_evidence: Mapped[str | None] = mapped_column(Text)
+    verifier_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    risk: Mapped[Risk] = relationship(back_populates="iterations")
+    verifier: Mapped[User | None] = relationship(foreign_keys=[verifier_id])
+    task_links: Mapped[list["RiskIterationTask"]] = relationship(
+        back_populates="iteration", cascade="all, delete-orphan"
+    )
+
+
+class RiskIterationTask(Base):
+    __tablename__ = "risk_iteration_tasks"
+    __table_args__ = (UniqueConstraint("iteration_id", "task_id", name="uq_risk_iteration_task"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    iteration_id: Mapped[int] = mapped_column(ForeignKey("risk_iterations.id"), index=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), index=True)
+
+    iteration: Mapped[RiskIteration] = relationship(back_populates="task_links")
+    task: Mapped[Task] = relationship()
 
 
 class AuditLog(Base):

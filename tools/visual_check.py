@@ -61,6 +61,13 @@ PAGES = [
         "right_arrow": True,
         "dropdown_index": 1,
     },
+    {
+        "slug": "risks",
+        "nav": re.compile(r"Gestion des risques", re.I),
+        "header": '[class*="st-key-pv_sticky_header_risks"]',
+        "content": "Matrice des risques",
+        "dropdown_index": 1,
+    },
 ]
 
 
@@ -283,7 +290,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    out_dir = Path(args.out)
+    out_dir = Path(args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if not wait_for_server(args.url, args.server_timeout):

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -18,6 +18,10 @@ from .models import (
     BudgetLine,
     PlannedTimeEntry,
     Project,
+    Risk,
+    RiskAssessment,
+    RiskIteration,
+    RiskIterationTask,
     Task,
     TaskAssignment,
     TaskDependency,
@@ -26,6 +30,60 @@ from .models import (
     UserGridPreference,
 )
 from .security import hash_password, verify_password
+
+
+RISK_LEVELS = ["Low", "Medium", "High", "Extreme"]
+RISK_LEVEL_RANK = {name: index for index, name in enumerate(RISK_LEVELS)}
+RISK_MATRIX = {
+    "A": ["Medium", "Medium", "High", "Extreme", "Extreme"],
+    "B": ["Low", "Medium", "High", "High", "Extreme"],
+    "C": ["Low", "Medium", "Medium", "High", "High"],
+    "D": ["Low", "Low", "Medium", "Medium", "Medium"],
+    "E": ["Low", "Low", "Low", "Low", "Medium"],
+}
+LIKELIHOOD_DEFINITIONS = {
+    "A": ("Almost Certain", "Attendu dans la plupart des circonstances; événement annuel ou circonstances déjà engagées."),
+    "B": ("Likely", "Déjà survenu ces dernières années, récemment dans une organisation comparable, ou attendu à court terme."),
+    "C": ("Possible", "Déjà survenu au moins une fois ou probabilité annuelle estimée à environ 5 %."),
+    "D": ("Unlikely", "Jamais survenu localement mais observé rarement ailleurs, ou probabilité annuelle proche de 1 %."),
+    "E": ("Rare", "Circonstances exceptionnelles uniquement; très nettement moins de 1 % de probabilité annuelle."),
+}
+CONSEQUENCE_DEFINITIONS = {
+    1: ("Insignificant", "Affection ne nécessitant pas de traitement médical."),
+    2: ("Minor", "Blessure mineure nécessitant des premiers soins."),
+    3: ("Significant", "Une blessure grave avec hospitalisation ou plusieurs blessures mineures."),
+    4: ("Major", "Une blessure mettant la vie en danger ou plusieurs blessures graves avec hospitalisation."),
+    5: ("Catastrophic", "Un décès ou plusieurs blessures mettant la vie en danger."),
+}
+RISK_LIKELIHOOD_DEFINITIONS = {
+    key: f"{name} - {description}" for key, (name, description) in LIKELIHOOD_DEFINITIONS.items()
+}
+RISK_CONSEQUENCE_DEFINITIONS = {
+    key: f"{name} - {description}" for key, (name, description) in CONSEQUENCE_DEFINITIONS.items()
+}
+RISK_LIFECYCLE_PHASES = [
+    "Conception",
+    "Fabrication",
+    "Montage et essais",
+    "Emballage, stockage et transport",
+    "Installation",
+    "Mise en service",
+    "Utilisation",
+    "Maintenance",
+    "Démantèlement",
+]
+
+
+def risk_level(likelihood: str, consequence: int) -> str:
+    likelihood = str(likelihood).strip().upper()
+    consequence = int(consequence)
+    if likelihood not in RISK_MATRIX or consequence not in range(1, 6):
+        raise ValueError("La vraisemblance doit être comprise entre A et E et la conséquence entre 1 et 5.")
+    return RISK_MATRIX[likelihood][consequence - 1]
+
+
+def risk_is_within_threshold(level: str, threshold: str) -> bool:
+    return RISK_LEVEL_RANK[level] <= RISK_LEVEL_RANK[threshold]
 
 
 def decimal_to_float(value: Any) -> Any:
@@ -1423,6 +1481,402 @@ def update_users_from_df(session: Session, data: pd.DataFrame) -> None:
     recompute_actuals(session)
 
 
+def next_risk_assessment_reference(session: Session, project_id: int) -> str:
+    project = get_project(session, project_id)
+    references = session.scalars(
+        select(RiskAssessment.reference).where(RiskAssessment.project_id == project_id)
+    ).all()
+    prefix = f"{project.code}-RSK-"
+    numbers = [int(ref.removeprefix(prefix)) for ref in references if ref.startswith(prefix) and ref.removeprefix(prefix).isdigit()]
+    return f"{prefix}{max(numbers, default=0) + 1:02d}"
+
+
+def create_risk_assessment(
+    session: Session,
+    project_id: int,
+    title: str,
+    leader_id: int | None,
+    product_or_change: str = "",
+    scope: str = "",
+    assumptions: str = "",
+    applicable_requirements: str = "",
+    acceptance_threshold: str = "Low",
+    is_itns: bool = False,
+    safety_importance: str = "Non applicable",
+    graded_approach_rationale: str = "",
+) -> RiskAssessment:
+    if acceptance_threshold not in RISK_LEVELS:
+        raise ValueError("Seuil d'acceptation invalide.")
+    assessment = RiskAssessment(
+        project_id=project_id,
+        reference=next_risk_assessment_reference(session, project_id),
+        title=title.strip(),
+        leader_id=leader_id,
+        product_or_change=product_or_change.strip() or None,
+        scope=scope.strip() or None,
+        assumptions=assumptions.strip() or None,
+        applicable_requirements=applicable_requirements.strip() or None,
+        acceptance_threshold=acceptance_threshold,
+        is_itns=bool(is_itns),
+        safety_importance=safety_importance,
+        graded_approach_rationale=graded_approach_rationale.strip() or None,
+    )
+    if not assessment.title:
+        raise ValueError("Le titre de l'analyse est obligatoire.")
+    session.add(assessment)
+    session.flush()
+    return assessment
+
+
+def update_risk_assessment(session: Session, assessment_id: int, **changes: Any) -> RiskAssessment:
+    assessment = session.get(RiskAssessment, assessment_id)
+    if not assessment:
+        raise ValueError("Analyse de risques introuvable.")
+    if assessment.status == "Clôturée" and set(changes) - {"status"}:
+        raise ValueError("Rouvrez l'analyse avant de la modifier.")
+    allowed = {
+        "title", "leader_id", "product_or_change", "scope", "assumptions",
+        "applicable_requirements", "acceptance_threshold", "is_itns",
+        "safety_importance", "graded_approach_rationale", "start_date",
+    }
+    for field, value in changes.items():
+        if field not in allowed or value is None:
+            continue
+        if field == "acceptance_threshold" and value not in RISK_LEVELS:
+            raise ValueError("Seuil d'acceptation invalide.")
+        if isinstance(value, str):
+            value = value.strip()
+        setattr(assessment, field, value)
+    if not assessment.title:
+        raise ValueError("Le titre de l'analyse est obligatoire.")
+    session.flush()
+    return assessment
+
+
+def next_risk_reference(session: Session, assessment: RiskAssessment) -> str:
+    references = session.scalars(select(Risk.reference).where(Risk.assessment_id == assessment.id)).all()
+    prefix = f"{assessment.reference}-R"
+    numbers = [int(ref.removeprefix(prefix)) for ref in references if ref.startswith(prefix) and ref.removeprefix(prefix).isdigit()]
+    return f"{prefix}{max(numbers, default=0) + 1:03d}"
+
+
+def create_risk(
+    session: Session,
+    assessment_id: int,
+    lifecycle_phase: str,
+    activity: str,
+    hazard: str,
+    cause: str,
+    potential_consequence: str,
+    existing_controls: str,
+    owner_id: int | None,
+    initial_likelihood: str,
+    initial_consequence: int,
+) -> Risk:
+    assessment = session.get(RiskAssessment, assessment_id)
+    if not assessment:
+        raise ValueError("Analyse de risques introuvable.")
+    if assessment.status == "Clôturée":
+        raise ValueError("Une analyse clôturée ne peut plus recevoir de risque.")
+    level = risk_level(initial_likelihood, initial_consequence)
+    risk = Risk(
+        assessment_id=assessment_id,
+        reference=next_risk_reference(session, assessment),
+        lifecycle_phase=lifecycle_phase,
+        activity=activity.strip(),
+        hazard=hazard.strip(),
+        cause=cause.strip() or None,
+        potential_consequence=potential_consequence.strip(),
+        existing_controls=existing_controls.strip() or None,
+        owner_id=owner_id,
+        initial_likelihood=initial_likelihood.upper(),
+        initial_consequence=int(initial_consequence),
+        initial_level=level,
+    )
+    if not risk.activity or not risk.hazard or not risk.potential_consequence:
+        raise ValueError("Activité, danger et conséquence potentielle sont obligatoires.")
+    session.add(risk)
+    session.flush()
+    return risk
+
+
+def update_risk(session: Session, risk_id: int, **changes: Any) -> Risk:
+    risk = session.get(Risk, risk_id)
+    if not risk:
+        raise ValueError("Risque introuvable.")
+    if risk.assessment.status == "Clôturée":
+        raise ValueError("Rouvrez l'analyse avant de modifier un risque.")
+    allowed = {
+        "lifecycle_phase", "activity", "hazard", "cause", "potential_consequence",
+        "existing_controls", "owner_id", "initial_likelihood", "initial_consequence",
+    }
+    for field, value in changes.items():
+        if field not in allowed or value is None:
+            continue
+        if isinstance(value, str):
+            value = value.strip()
+        setattr(risk, field, value)
+    risk.initial_likelihood = risk.initial_likelihood.upper()
+    risk.initial_consequence = int(risk.initial_consequence)
+    risk.initial_level = risk_level(risk.initial_likelihood, risk.initial_consequence)
+    if not risk.activity or not risk.hazard or not risk.potential_consequence:
+        raise ValueError("Activité, danger et conséquence potentielle sont obligatoires.")
+    risk.acceptance_status = "À statuer"
+    risk.acceptance_justification = None
+    risk.acceptance_user_id = None
+    risk.acceptance_date = None
+    session.flush()
+    return risk
+
+
+def risk_kpis(session: Session, project_id: int | None = None) -> dict[str, int]:
+    assessment_stmt = select(RiskAssessment.id)
+    if project_id:
+        assessment_stmt = assessment_stmt.where(RiskAssessment.project_id == project_id)
+    assessment_ids = session.scalars(assessment_stmt).all()
+    risks = session.scalars(select(Risk).where(Risk.assessment_id.in_(assessment_ids))).all() if assessment_ids else []
+    levels = [current_risk_rating(risk)[2] for risk in risks]
+    return {
+        "analyses": len(assessment_ids),
+        "risks": len(risks),
+        "high_or_extreme": sum(level in {"High", "Extreme"} for level in levels),
+        "pending_acceptance": sum(risk.acceptance_status == "À statuer" for risk in risks),
+    }
+
+
+def current_risk_rating(risk: Risk) -> tuple[str, int, str]:
+    verified = [item for item in risk.iterations if item.verification_status == "Vérifiée" and item.verified_level]
+    if verified:
+        latest = max(verified, key=lambda item: item.sequence)
+        return str(latest.verified_likelihood), int(latest.verified_consequence), str(latest.verified_level)
+    return risk.initial_likelihood, risk.initial_consequence, risk.initial_level
+
+
+def create_risk_iteration(
+    session: Session,
+    risk_id: int,
+    treatment: str,
+    reduction_objective: str,
+    additional_controls: str,
+    contingency_plan: str,
+    target_likelihood: str,
+    target_consequence: int,
+    task_ids: list[int] | None = None,
+) -> RiskIteration:
+    risk = session.get(Risk, risk_id)
+    if not risk:
+        raise ValueError("Risque introuvable.")
+    if risk.assessment.status == "Clôturée":
+        raise ValueError("L'analyse est clôturée.")
+    sequence = (session.scalar(select(func.max(RiskIteration.sequence)).where(RiskIteration.risk_id == risk_id)) or 0) + 1
+    iteration = RiskIteration(
+        risk_id=risk_id,
+        sequence=sequence,
+        treatment=treatment.strip(),
+        reduction_objective=reduction_objective.strip() or None,
+        additional_controls=additional_controls.strip() or None,
+        contingency_plan=contingency_plan.strip() or None,
+        target_likelihood=target_likelihood.upper(),
+        target_consequence=int(target_consequence),
+        target_level=risk_level(target_likelihood, target_consequence),
+    )
+    if not iteration.treatment:
+        raise ValueError("Le traitement du risque est obligatoire.")
+    session.add(iteration)
+    session.flush()
+    for task_id in dict.fromkeys(task_ids or []):
+        task = session.get(Task, int(task_id))
+        if not task or task.project_id != risk.assessment.project_id:
+            raise ValueError("Toutes les actions doivent appartenir au projet de l'analyse.")
+        session.add(RiskIterationTask(iteration_id=iteration.id, task_id=task.id))
+    session.flush()
+    return iteration
+
+
+def verify_risk_iteration(
+    session: Session,
+    iteration_id: int,
+    likelihood: str,
+    consequence: int,
+    evidence: str,
+    verifier_id: int,
+) -> RiskIteration:
+    iteration = session.get(RiskIteration, iteration_id)
+    if not iteration:
+        raise ValueError("Itération introuvable.")
+    if not evidence.strip():
+        raise ValueError("Une preuve de vérification est obligatoire.")
+    finished_statuses = {"termine", "terminee", "cloture", "cloturee"}
+    unfinished = [
+        link.task.reference
+        for link in iteration.task_links
+        if link.task.status.lower().replace("é", "e").replace("ô", "o") not in finished_statuses
+    ]
+    if unfinished:
+        raise ValueError("Les actions liées doivent être terminées avant vérification : " + ", ".join(unfinished))
+    iteration.verified_likelihood = likelihood.upper()
+    iteration.verified_consequence = int(consequence)
+    iteration.verified_level = risk_level(likelihood, consequence)
+    iteration.verification_evidence = evidence.strip()
+    iteration.verification_status = "Vérifiée"
+    iteration.verifier_id = verifier_id
+    iteration.verified_at = datetime.utcnow()
+    iteration.risk.acceptance_status = "À statuer"
+    iteration.risk.acceptance_justification = None
+    iteration.risk.acceptance_user_id = None
+    iteration.risk.acceptance_date = None
+    session.flush()
+    return iteration
+
+
+def decide_risk_acceptance(
+    session: Session,
+    risk_id: int,
+    decision: str,
+    justification: str,
+    user_id: int,
+) -> Risk:
+    risk = session.get(Risk, risk_id)
+    if not risk:
+        raise ValueError("Risque introuvable.")
+    allowed = {"À statuer", "Accepté", "Non accepté", "Accepté par dérogation"}
+    if decision not in allowed:
+        raise ValueError("Décision d'acceptation invalide.")
+    _, _, level = current_risk_rating(risk)
+    within = risk_is_within_threshold(level, risk.assessment.acceptance_threshold)
+    if decision == "Accepté" and not within:
+        raise ValueError("Ce niveau dépasse le seuil; utilisez une dérogation motivée.")
+    if decision in {"Accepté", "Non accepté", "Accepté par dérogation"} and not justification.strip():
+        raise ValueError("La justification de la décision est obligatoire.")
+    risk.acceptance_status = decision
+    risk.acceptance_justification = justification.strip() or None
+    risk.acceptance_user_id = user_id if decision != "À statuer" else None
+    risk.acceptance_date = datetime.utcnow() if decision != "À statuer" else None
+    session.flush()
+    return risk
+
+
+def set_risk_assessment_status(session: Session, assessment_id: int, status: str) -> RiskAssessment:
+    assessment = session.get(RiskAssessment, assessment_id)
+    if not assessment:
+        raise ValueError("Analyse de risques introuvable.")
+    if status not in {"Ouverte", "Clôturée"}:
+        raise ValueError("Statut d'analyse invalide.")
+    if status == "Clôturée":
+        if not assessment.risks:
+            raise ValueError("Une analyse vide ne peut pas être clôturée.")
+        unresolved = [risk.reference for risk in assessment.risks if risk.acceptance_status not in {"Accepté", "Accepté par dérogation"}]
+        pending = [risk.reference for risk in assessment.risks if any(item.verification_status != "Vérifiée" for item in risk.iterations)]
+        if unresolved:
+            raise ValueError("Risques sans décision acceptable : " + ", ".join(unresolved))
+        if pending:
+            raise ValueError("Risques avec itération non vérifiée : " + ", ".join(pending))
+        assessment.closed_at = datetime.utcnow()
+    else:
+        assessment.closed_at = None
+    assessment.status = status
+    session.flush()
+    return assessment
+
+
+def risk_assessments_df(session: Session, project_id: int) -> pd.DataFrame:
+    rows = []
+    assessments = session.scalars(select(RiskAssessment).where(RiskAssessment.project_id == project_id).order_by(RiskAssessment.reference)).all()
+    for item in assessments:
+        rows.append({
+            "ID": item.id,
+            "Référence": item.reference,
+            "Analyse": item.title,
+            "Statut": item.status,
+            "Seuil": item.acceptance_threshold,
+            "Responsable": item.leader.full_name if item.leader else "",
+            "Produit / modification": item.product_or_change or "",
+            "Périmètre": item.scope or "",
+            "Hypothèses": item.assumptions or "",
+            "Exigences": item.applicable_requirements or "",
+            "ITNS": item.is_itns,
+            "Importance sûreté": item.safety_importance,
+            "Approche graduée": item.graded_approach_rationale or "",
+            "Normes": item.standards,
+        })
+    return pd.DataFrame(rows)
+
+
+def risks_df(session: Session, assessment_ids: list[int]) -> pd.DataFrame:
+    if not assessment_ids:
+        return pd.DataFrame()
+    rows = []
+    risks = session.scalars(select(Risk).where(Risk.assessment_id.in_(assessment_ids)).order_by(Risk.reference)).all()
+    for item in risks:
+        likelihood, consequence, level = current_risk_rating(item)
+        rows.append({
+            "ID": item.id,
+            "Analyse ID": item.assessment_id,
+            "Analyse": item.assessment.reference,
+            "Référence": item.reference,
+            "Phase": item.lifecycle_phase,
+            "Activité": item.activity,
+            "Danger": item.hazard,
+            "Cause": item.cause or "",
+            "Conséquence potentielle": item.potential_consequence,
+            "Maîtrises existantes": item.existing_controls or "",
+            "Responsable": item.owner.full_name if item.owner else "",
+            "Vraisemblance initiale": item.initial_likelihood,
+            "Conséquence initiale": item.initial_consequence,
+            "Niveau initial": item.initial_level,
+            "Vraisemblance courante": likelihood,
+            "Conséquence courante": consequence,
+            "Niveau courant": level,
+            "Acceptation": item.acceptance_status,
+            "Justification": item.acceptance_justification or "",
+        })
+    return pd.DataFrame(rows)
+
+
+def risk_iterations_df(session: Session, risk_id: int) -> pd.DataFrame:
+    rows = []
+    items = session.scalars(select(RiskIteration).where(RiskIteration.risk_id == risk_id).order_by(RiskIteration.sequence)).all()
+    for item in items:
+        rows.append({
+            "ID": item.id,
+            "Itération": item.sequence,
+            "Traitement": item.treatment,
+            "Objectif": item.reduction_objective or "",
+            "Maîtrises ajoutées": item.additional_controls or "",
+            "Contingence": item.contingency_plan or "",
+            "Cible": f"{item.target_likelihood}{item.target_consequence} - {item.target_level}",
+            "Statut vérification": item.verification_status,
+            "Résiduel vérifié": (
+                f"{item.verified_likelihood}{item.verified_consequence} - {item.verified_level}"
+                if item.verified_level else ""
+            ),
+            "Preuve": item.verification_evidence or "",
+            "Actions": ", ".join(link.task.reference for link in item.task_links),
+        })
+    return pd.DataFrame(rows)
+
+
+def risk_matrix_paths(session: Session, assessment_ids: list[int]) -> list[dict[str, Any]]:
+    if not assessment_ids:
+        return []
+    paths = []
+    for risk in session.scalars(select(Risk).where(Risk.assessment_id.in_(assessment_ids)).order_by(Risk.reference)).all():
+        points = [{"likelihood": risk.initial_likelihood, "consequence": risk.initial_consequence, "level": risk.initial_level, "kind": "Initiale"}]
+        for item in sorted(risk.iterations, key=lambda value: value.sequence):
+            if item.verification_status == "Vérifiée" and item.verified_level:
+                points.append({"likelihood": item.verified_likelihood, "consequence": item.verified_consequence, "level": item.verified_level, "kind": f"Itération {item.sequence}"})
+        pending = next((item for item in reversed(risk.iterations) if item.verification_status != "Vérifiée"), None)
+        paths.append({
+            "risk_id": risk.id,
+            "reference": risk.reference,
+            "hazard": risk.hazard,
+            "acceptance": risk.acceptance_status,
+            "points": points,
+            "pending_target": ({"likelihood": pending.target_likelihood, "consequence": pending.target_consequence, "level": pending.target_level} if pending else None),
+        })
+    return paths
+
+
 def _task_descendant_ids(session: Session, task_id: int) -> list[int]:
     root = session.get(Task, task_id)
     if not root:
@@ -1448,7 +1902,7 @@ def _task_descendant_ids(session: Session, task_id: int) -> list[int]:
 
 def _count_task_links(session: Session, task_ids: list[int]) -> dict[str, int]:
     if not task_ids:
-        return {"assignments": 0, "time_entries": 0, "planned_time_entries": 0, "dependencies": 0}
+        return {"assignments": 0, "time_entries": 0, "planned_time_entries": 0, "dependencies": 0, "risk_actions": 0}
     return {
         "assignments": session.scalar(select(func.count(TaskAssignment.id)).where(TaskAssignment.task_id.in_(task_ids))) or 0,
         "time_entries": session.scalar(select(func.count(TimeEntry.id)).where(TimeEntry.task_id.in_(task_ids))) or 0,
@@ -1460,6 +1914,10 @@ def _count_task_links(session: Session, task_ids: list[int]) -> dict[str, int]:
             select(func.count(TaskDependency.id)).where(
                 or_(TaskDependency.predecessor_id.in_(task_ids), TaskDependency.successor_id.in_(task_ids))
             )
+        )
+        or 0,
+        "risk_actions": session.scalar(
+            select(func.count(RiskIterationTask.id)).where(RiskIterationTask.task_id.in_(task_ids))
         )
         or 0,
     }
@@ -1474,6 +1932,13 @@ def deletion_preview(session: Session, entity: str, record_id: int) -> dict[str,
         task_links = _count_task_links(session, task_ids)
         budgets = session.scalar(select(func.count(Budget.id)).where(Budget.project_id == project.id)) or 0
         budget_lines = session.scalar(select(func.count(BudgetLine.id)).where(BudgetLine.project_id == project.id)) or 0
+        assessment_ids = session.scalars(
+            select(RiskAssessment.id).where(RiskAssessment.project_id == project.id)
+        ).all()
+        risk_ids = session.scalars(select(Risk.id).where(Risk.assessment_id.in_(assessment_ids))).all() if assessment_ids else []
+        iterations = session.scalar(
+            select(func.count(RiskIteration.id)).where(RiskIteration.risk_id.in_(risk_ids))
+        ) if risk_ids else 0
         return {
             "label": f"{project.code} - {project.name}",
             "impacts": [
@@ -1484,6 +1949,8 @@ def deletion_preview(session: Session, entity: str, record_id: int) -> dict[str,
                 f"{task_links['dependencies']} dépendance(s) supprimée(s)",
                 f"{budgets} budget(s) supprimé(s)",
                 f"{budget_lines} ligne(s) de frais supprimée(s)",
+                f"{len(assessment_ids)} analyse(s) de risques supprimée(s)",
+                f"{len(risk_ids)} risque(s) et {iterations or 0} itération(s) supprimé(s)",
             ],
         }
 
@@ -1501,6 +1968,7 @@ def deletion_preview(session: Session, entity: str, record_id: int) -> dict[str,
                 f"{task_links['time_entries']} pointage(s) supprimé(s)",
                 f"{task_links['planned_time_entries']} planification(s) supprimée(s)",
                 f"{task_links['dependencies']} dépendance(s) supprimée(s)",
+                f"{task_links['risk_actions']} lien(s) action/risque supprimé(s)",
             ],
         }
 
@@ -1579,6 +2047,37 @@ def deletion_preview(session: Session, entity: str, record_id: int) -> dict[str,
             ],
         }
 
+    if entity == "risk_assessment":
+        assessment = session.get(RiskAssessment, record_id)
+        if not assessment:
+            raise ValueError("Analyse de risques introuvable.")
+        risk_ids = [risk.id for risk in assessment.risks]
+        iterations = session.scalar(
+            select(func.count(RiskIteration.id)).where(RiskIteration.risk_id.in_(risk_ids))
+        ) if risk_ids else 0
+        return {
+            "label": f"{assessment.reference} - {assessment.title}",
+            "impacts": [f"{len(risk_ids)} risque(s) supprimé(s)", f"{iterations or 0} itération(s) et leurs liens d'action supprimés"],
+        }
+
+    if entity == "risk":
+        risk = session.get(Risk, record_id)
+        if not risk:
+            raise ValueError("Risque introuvable.")
+        return {
+            "label": f"{risk.reference} - {risk.hazard}",
+            "impacts": [f"{len(risk.iterations)} itération(s) et leurs liens d'action supprimés"],
+        }
+
+    if entity == "risk_iteration":
+        iteration = session.get(RiskIteration, record_id)
+        if not iteration:
+            raise ValueError("Itération introuvable.")
+        return {
+            "label": f"{iteration.risk.reference} - itération {iteration.sequence}",
+            "impacts": [f"{len(iteration.task_links)} lien(s) vers des tâches supprimé(s)"],
+        }
+
     if entity == "user":
         user = session.get(User, record_id)
         if not user:
@@ -1613,6 +2112,7 @@ def delete_record(session: Session, entity: str, record_id: int) -> None:
             raise ValueError("Projet introuvable.")
         task_ids = [task.id for task in session.scalars(select(Task).where(Task.project_id == project.id)).all()]
         if task_ids:
+            session.execute(delete(RiskIterationTask).where(RiskIterationTask.task_id.in_(task_ids)))
             session.execute(
                 delete(TaskDependency).where(
                     or_(TaskDependency.predecessor_id.in_(task_ids), TaskDependency.successor_id.in_(task_ids))
@@ -1627,6 +2127,9 @@ def delete_record(session: Session, entity: str, record_id: int) -> None:
         task_ids = _task_descendant_ids(session, record_id)
         if not task_ids:
             raise ValueError("Tâche introuvable.")
+        session.execute(
+            delete(RiskIterationTask).where(RiskIterationTask.task_id.in_(task_ids))
+        )
         session.execute(
             delete(TaskDependency).where(
                 or_(TaskDependency.predecessor_id.in_(task_ids), TaskDependency.successor_id.in_(task_ids))
@@ -1701,6 +2204,30 @@ def delete_record(session: Session, entity: str, record_id: int) -> None:
         recompute_actuals(session)
         return
 
+    if entity == "risk_assessment":
+        assessment = session.get(RiskAssessment, record_id)
+        if not assessment:
+            raise ValueError("Analyse de risques introuvable.")
+        session.delete(assessment)
+        session.flush()
+        return
+
+    if entity == "risk":
+        risk = session.get(Risk, record_id)
+        if not risk:
+            raise ValueError("Risque introuvable.")
+        session.delete(risk)
+        session.flush()
+        return
+
+    if entity == "risk_iteration":
+        iteration = session.get(RiskIteration, record_id)
+        if not iteration:
+            raise ValueError("Itération introuvable.")
+        session.delete(iteration)
+        session.flush()
+        return
+
     if entity == "user":
         user = session.get(User, record_id)
         if not user:
@@ -1716,6 +2243,14 @@ def delete_record(session: Session, entity: str, record_id: int) -> None:
         session.execute(delete(TimeEntry).where(TimeEntry.user_id == user.id))
         session.execute(delete(PlannedTimeEntry).where(PlannedTimeEntry.user_id == user.id))
         session.execute(delete(UserGridPreference).where(UserGridPreference.user_id == user.id))
+        for assessment in session.scalars(select(RiskAssessment).where(RiskAssessment.leader_id == user.id)).all():
+            assessment.leader_id = None
+        for risk in session.scalars(select(Risk).where(Risk.owner_id == user.id)).all():
+            risk.owner_id = None
+        for risk in session.scalars(select(Risk).where(Risk.acceptance_user_id == user.id)).all():
+            risk.acceptance_user_id = None
+        for iteration in session.scalars(select(RiskIteration).where(RiskIteration.verifier_id == user.id)).all():
+            iteration.verifier_id = None
         session.delete(user)
         session.flush()
         recompute_actuals(session)

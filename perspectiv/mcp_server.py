@@ -28,6 +28,9 @@ from .models import (
     IdempotencyRecord,
     PlannedTimeEntry,
     Project,
+    Risk,
+    RiskAssessment,
+    RiskIteration,
     Task,
     TaskAssignment,
     TaskDependency,
@@ -56,15 +59,23 @@ from .services import (
     budget_df,
     create_task,
     create_project,
+    create_risk,
+    create_risk_assessment,
+    create_risk_iteration,
+    decide_risk_acceptance,
     delete_record,
     deletion_preview,
     ensure_direct_time_task,
     kpis,
     recompute_actuals,
+    risk_matrix_paths,
+    risks_df,
+    set_risk_assessment_status,
     save_weekly_planning,
     save_weekly_timesheet,
     tasks_df,
     validate_task_tree,
+    verify_risk_iteration,
     week_day_columns,
     week_start,
 )
@@ -508,6 +519,94 @@ def update_dependency(dependency_id: int, payload: DependencyPatch) -> dict[str,
         return {"id": dependency.id, "link_type": dependency.link_type, "lag_days": dependency.lag_days}
 
 
+@mcp.tool(annotations=READ_ONLY)
+def list_project_risks(project_id: int) -> dict[str, Any]:
+    """Liste les analyses, risques, cotations courantes et chemins de réduction d'un projet."""
+    principal = _principal()
+    require_scope(principal, "read")
+    with session_scope() as session:
+        assessments = session.scalars(select(RiskAssessment).where(RiskAssessment.project_id == project_id).order_by(RiskAssessment.reference)).all()
+        assessment_ids = [item.id for item in assessments]
+        risks = session.scalars(select(Risk).where(Risk.assessment_id.in_(assessment_ids)).order_by(Risk.reference)).all() if assessment_ids else []
+        return {
+            "analyses": [{"id": item.id, "reference": item.reference, "title": item.title, "status": item.status, "threshold": item.acceptance_threshold} for item in assessments],
+            "risks": [{"id": item.id, "assessment_id": item.assessment_id, "reference": item.reference, "hazard": item.hazard, "initial_level": item.initial_level, "acceptance": item.acceptance_status} for item in risks],
+            "matrix_paths": risk_matrix_paths(session, assessment_ids),
+        }
+
+
+@mcp.tool(annotations=WRITE)
+def create_risk_analysis(project_id: int, title: str, leader_id: int | None = None, acceptance_threshold: str = "Low", scope: str = "") -> dict[str, Any]:
+    """Crée une analyse de risques produit rattachée à un projet."""
+    principal = _principal()
+    require_manager(principal)
+    require_scope(principal, "projects:write")
+    with session_scope() as session:
+        item = create_risk_assessment(session, project_id, title, leader_id, scope=scope, acceptance_threshold=acceptance_threshold)
+        record_audit(session, actor_user_id=principal.user_id, source="mcp", action="create", entity_type="risk_assessment", entity_id=item.id, after=item)
+        return {"id": item.id, "reference": item.reference, "title": item.title, "status": item.status}
+
+
+@mcp.tool(annotations=WRITE)
+def create_project_risk(assessment_id: int, activity: str, hazard: str, potential_consequence: str, initial_likelihood: str, initial_consequence: int, lifecycle_phase: str = "Conception", cause: str = "", existing_controls: str = "", owner_id: int | None = None) -> dict[str, Any]:
+    """Ajoute un risque et calcule sa cotation initiale avec la matrice PerspectiV."""
+    principal = _principal()
+    require_manager(principal)
+    require_scope(principal, "projects:write")
+    with session_scope() as session:
+        item = create_risk(session, assessment_id, lifecycle_phase, activity, hazard, cause, potential_consequence, existing_controls, owner_id, initial_likelihood, initial_consequence)
+        record_audit(session, actor_user_id=principal.user_id, source="mcp", action="create", entity_type="risk", entity_id=item.id, after=item)
+        return {"id": item.id, "reference": item.reference, "initial_level": item.initial_level}
+
+
+@mcp.tool(annotations=WRITE)
+def add_risk_reduction_iteration(risk_id: int, treatment: str, target_likelihood: str, target_consequence: int, task_ids: list[int] | None = None, reduction_objective: str = "", additional_controls: str = "", contingency_plan: str = "") -> dict[str, Any]:
+    """Ajoute une itération de réduction et lie les actions aux tâches du même projet."""
+    principal = _principal()
+    require_manager(principal)
+    require_scope(principal, "projects:write")
+    with session_scope() as session:
+        item = create_risk_iteration(session, risk_id, treatment, reduction_objective, additional_controls, contingency_plan, target_likelihood, target_consequence, task_ids)
+        record_audit(session, actor_user_id=principal.user_id, source="mcp", action="create", entity_type="risk_iteration", entity_id=item.id, after=item)
+        return {"id": item.id, "sequence": item.sequence, "target_level": item.target_level, "verification_status": item.verification_status}
+
+
+@mcp.tool(annotations=WRITE)
+def verify_risk_reduction(iteration_id: int, likelihood: str, consequence: int, evidence: str) -> dict[str, Any]:
+    """Vérifie une itération; la cotation résiduelle devient alors la cotation officielle."""
+    principal = _principal()
+    require_manager(principal)
+    require_scope(principal, "projects:write")
+    with session_scope() as session:
+        item = verify_risk_iteration(session, iteration_id, likelihood, consequence, evidence, principal.user_id)
+        record_audit(session, actor_user_id=principal.user_id, source="mcp", action="verify", entity_type="risk_iteration", entity_id=item.id, after=item)
+        return {"id": item.id, "verified_level": item.verified_level, "verification_status": item.verification_status}
+
+
+@mcp.tool(annotations=WRITE)
+def decide_risk(risk_id: int, decision: str, justification: str) -> dict[str, Any]:
+    """Enregistre la décision humaine d'acceptation ou de refus d'un risque."""
+    principal = _principal()
+    require_manager(principal)
+    require_scope(principal, "projects:write")
+    with session_scope() as session:
+        item = decide_risk_acceptance(session, risk_id, decision, justification, principal.user_id)
+        record_audit(session, actor_user_id=principal.user_id, source="mcp", action="acceptance", entity_type="risk", entity_id=item.id, after=item)
+        return {"id": item.id, "reference": item.reference, "acceptance": item.acceptance_status}
+
+
+@mcp.tool(annotations=WRITE)
+def change_risk_analysis_status(assessment_id: int, status: str) -> dict[str, Any]:
+    """Ouvre ou clôture une analyse après contrôle de toutes les décisions et vérifications."""
+    principal = _principal()
+    require_manager(principal)
+    require_scope(principal, "projects:write")
+    with session_scope() as session:
+        item = set_risk_assessment_status(session, assessment_id, status)
+        record_audit(session, actor_user_id=principal.user_id, source="mcp", action="status", entity_type="risk_assessment", entity_id=item.id, after=item)
+        return {"id": item.id, "reference": item.reference, "status": item.status}
+
+
 @mcp.tool(annotations=DESTRUCTIVE)
 def preview_deletion(entity: str, record_id: int) -> dict[str, Any]:
     """Prévisualise tous les impacts d'une suppression et produit un jeton temporaire à confirmer."""
@@ -548,7 +647,14 @@ def generate_project_report(project_id: int) -> dict[str, Any]:
         project = session.get(Project, project_id)
         if not project:
             raise ValueError("Projet introuvable.")
-        output = build_project_pdf(f"{project.code} - {project.name}", kpis(session, project_id), tasks_df(session, project_id), budget_df(session, project_id))
+        assessment_ids = session.scalars(select(RiskAssessment.id).where(RiskAssessment.project_id == project_id)).all()
+        output = build_project_pdf(
+            f"{project.code} - {project.name}",
+            kpis(session, project_id),
+            tasks_df(session, project_id),
+            budget_df(session, project_id),
+            risks_df(session, assessment_ids),
+        )
         record_audit(session, actor_user_id=principal.user_id, source="mcp", action="generate", entity_type="report", entity_id=project_id)
         return {"project_id": project_id, "filename": output.name, "download_url": f"{PUBLIC_URL}/api/v1/projects/{project_id}/reports/pdf"}
 

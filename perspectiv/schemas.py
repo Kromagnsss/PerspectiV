@@ -103,6 +103,83 @@ class BudgetLinePatch(BaseModel):
     actual_amount: float | None = Field(default=None, ge=0)
 
 
+class RiskAssessmentCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=220)
+    leader_id: int | None = None
+    product_or_change: str = ""
+    scope: str = ""
+    assumptions: str = ""
+    applicable_requirements: str = ""
+    acceptance_threshold: Literal["Low", "Medium", "High", "Extreme"] = "Low"
+    is_itns: bool = False
+    safety_importance: str = "Non applicable"
+    graded_approach_rationale: str = ""
+
+
+class RiskAssessmentPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str | None = Field(default=None, min_length=1, max_length=220)
+    leader_id: int | None = None
+    product_or_change: str | None = None
+    scope: str | None = None
+    assumptions: str | None = None
+    applicable_requirements: str | None = None
+    acceptance_threshold: Literal["Low", "Medium", "High", "Extreme"] | None = None
+    is_itns: bool | None = None
+    safety_importance: str | None = None
+    graded_approach_rationale: str | None = None
+
+
+class RiskAssessmentStatus(BaseModel):
+    status: Literal["Ouverte", "Clôturée"]
+
+
+class RiskCreate(BaseModel):
+    lifecycle_phase: str = "Conception"
+    activity: str = Field(min_length=1, max_length=220)
+    hazard: str = Field(min_length=1, max_length=220)
+    cause: str = ""
+    potential_consequence: str = Field(min_length=1)
+    existing_controls: str = ""
+    owner_id: int | None = None
+    initial_likelihood: Literal["A", "B", "C", "D", "E"]
+    initial_consequence: int = Field(ge=1, le=5)
+
+
+class RiskPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    lifecycle_phase: str | None = None
+    activity: str | None = Field(default=None, min_length=1, max_length=220)
+    hazard: str | None = Field(default=None, min_length=1, max_length=220)
+    cause: str | None = None
+    potential_consequence: str | None = Field(default=None, min_length=1)
+    existing_controls: str | None = None
+    owner_id: int | None = None
+    initial_likelihood: Literal["A", "B", "C", "D", "E"] | None = None
+    initial_consequence: int | None = Field(default=None, ge=1, le=5)
+
+
+class RiskIterationCreate(BaseModel):
+    treatment: str = Field(min_length=1)
+    reduction_objective: str = ""
+    additional_controls: str = ""
+    contingency_plan: str = ""
+    target_likelihood: Literal["A", "B", "C", "D", "E"]
+    target_consequence: int = Field(ge=1, le=5)
+    task_ids: list[int] = Field(default_factory=list)
+
+
+class RiskIterationVerify(BaseModel):
+    likelihood: Literal["A", "B", "C", "D", "E"]
+    consequence: int = Field(ge=1, le=5)
+    evidence: str = Field(min_length=1)
+
+
+class RiskAcceptance(BaseModel):
+    decision: Literal["À statuer", "Accepté", "Non accepté", "Accepté par dérogation"]
+    justification: str = ""
+
+
 class AssignmentCreate(BaseModel):
     task_id: int
     user_id: int
