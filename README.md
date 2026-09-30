@@ -116,6 +116,8 @@ update --restore /var/lib/perspectiv/backups/AAAAMMJJ_HHMMSS
 
 L'option `--allow-downgrade` existe pour une intervention volontaire et controlee uniquement.
 
+Le redemarrage attend jusqu'a 60 secondes que l'API accepte les connexions et verifie que `/health` annonce exactement la version de la release avant de valider l'activation.
+
 Pour un conteneur PerspectiV installe avant l'ajout de cette commande, l'amorcer une seule fois :
 
 ```bash

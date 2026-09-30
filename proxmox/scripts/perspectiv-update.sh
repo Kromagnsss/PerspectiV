@@ -8,6 +8,8 @@ BACKUP_ROOT="${PERSPECTIV_BACKUP_ROOT:-/var/lib/perspectiv/backups}"
 HEALTH_URL="${PERSPECTIV_HEALTH_URL:-http://127.0.0.1:8000/health}"
 KEEP_BACKUPS="${PERSPECTIV_KEEP_BACKUPS:-7}"
 KEEP_RELEASES="${PERSPECTIV_KEEP_RELEASES:-4}"
+HEALTH_ATTEMPTS="${PERSPECTIV_HEALTH_ATTEMPTS:-30}"
+HEALTH_DELAY="${PERSPECTIV_HEALTH_DELAY:-2}"
 FORCE=0
 CHECK_ONLY=0
 ALLOW_DOWNGRADE=0
@@ -67,6 +69,19 @@ done
 exec 9>/run/lock/perspectiv-update.lock
 flock -n 9 || fail "Une autre mise a jour PerspectiV est deja en cours."
 
+HEALTH_RESPONSE=""
+wait_for_health() {
+  attempt=1
+  while ((attempt <= HEALTH_ATTEMPTS)); do
+    if HEALTH_RESPONSE="$(curl -fsS --connect-timeout 2 "${HEALTH_URL}" 2>/dev/null)"; then
+      return 0
+    fi
+    sleep "${HEALTH_DELAY}"
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
 restore_backup() {
   restore_dir="$1"
   [[ -f "${restore_dir}/database.dump" ]] || fail "Sauvegarde PostgreSQL absente dans ${restore_dir}."
@@ -90,7 +105,7 @@ restore_backup() {
   psql "${restore_pg_url}" -v ON_ERROR_STOP=1 -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
   pg_restore --exit-on-error --no-owner --dbname="${restore_pg_url}" "${restore_dir}/database.dump"
   systemctl start perspectiv-api perspectiv-ui
-  if ! curl -fsS --retry 15 --retry-delay 2 "${HEALTH_URL}" >/dev/null; then
+  if ! wait_for_health; then
     journalctl -u perspectiv-api -u perspectiv-ui -n 100 --no-pager >&2 || true
     fail "La restauration est terminee mais le healthcheck echoue."
   fi
@@ -224,7 +239,7 @@ rollback() {
   psql "${pg_url}" -v ON_ERROR_STOP=1 -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;' || restore_ok=0
   pg_restore --exit-on-error --no-owner --dbname="${pg_url}" "${backup_dir}/database.dump" || restore_ok=0
   systemctl start perspectiv-api perspectiv-ui || restore_ok=0
-  if [[ ${restore_ok} -eq 1 ]] && curl -fsS --retry 12 --retry-delay 2 "${HEALTH_URL}" >/dev/null; then
+  if [[ ${restore_ok} -eq 1 ]] && wait_for_health; then
     log "Retour arriere termine."
   else
     printf '[PerspectiV] ERREUR: retour arriere incomplet; sauvegarde: %s\n' "${backup_dir}" >&2
@@ -259,8 +274,14 @@ ln -sfn "${release_dir}" "${INSTALL_ROOT}/current"
 systemctl daemon-reload
 systemctl start perspectiv-api perspectiv-ui
 
-if ! curl -fsS --retry 15 --retry-delay 2 "${HEALTH_URL}" >/dev/null; then
+if ! wait_for_health; then
   journalctl -u perspectiv-api -u perspectiv-ui -n 100 --no-pager >&2 || true
+  rollback
+  exit 1
+fi
+active_version="$(jq -r '.version // empty' <<<"${HEALTH_RESPONSE}")"
+if [[ "${active_version}" != "${latest_version}" ]]; then
+  printf '[PerspectiV] ERREUR: /health annonce la version %s au lieu de %s.\n' "${active_version:-inconnue}" "${latest_version}" >&2
   rollback
   exit 1
 fi

@@ -24,7 +24,8 @@ def test_updater_has_backup_healthcheck_and_rollback_guards() -> None:
         ".venv/bin/alembic upgrade head",
         "rollback()",
         "pg_restore --exit-on-error",
-        'curl -fsS --retry 15 --retry-delay 2 "${HEALTH_URL}"',
+        "wait_for_health()",
+        "HEALTH_ATTEMPTS",
         "ln -sfn /usr/local/sbin/perspectiv-update /usr/bin/update",
     ]
     for fragment in required_fragments:
@@ -42,6 +43,8 @@ def test_updater_refuses_implicit_downgrades_and_restores_clean_schema() -> None
     assert "--restore CHEMIN" in updater
     assert "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" in updater
     assert "pg_restore --exit-on-error" in updater
+    assert 'active_version="$(jq -r' in updater
+    assert "/health annonce la version" in updater
 
 
 def test_risk_migration_recovers_a_complete_unstamped_schema_only() -> None:
