@@ -118,6 +118,8 @@ L'option `--allow-downgrade` existe pour une intervention volontaire et controle
 
 Le redemarrage attend jusqu'a 60 secondes que l'API accepte les connexions et verifie que `/health` annonce exactement la version de la release avant de valider l'activation.
 
+Avant de publier une release, synchroniser la version de `pyproject.toml` et de `perspectiv/version.py`, puis lancer `python tools/check_release_version.py --tag vX.Y.Z`. Le workflow GitHub effectue ce controle avant toute installation de dependances ou creation d'archive et refuse un tag incoherent.
+
 Pour un conteneur PerspectiV installe avant l'ajout de cette commande, l'amorcer une seule fois :
 
 ```bash
