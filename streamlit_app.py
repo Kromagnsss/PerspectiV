@@ -87,6 +87,7 @@ from perspectiv.services import (
     update_risk_assessment,
     update_planned_time_entries_from_df,
     update_tasks_from_df,
+    update_tasks_from_projects_df,
     update_time_entries_from_df,
     update_task_budget_and_expense,
     update_users_from_df,
@@ -98,6 +99,7 @@ from perspectiv.services import (
     weekly_planning_df,
     weekly_timesheet_df,
     users_df,
+    visible_task_rows,
 )
 
 
@@ -240,6 +242,7 @@ TODAY_AGGRID_CSS = {
 }
 
 TASK_DISPLAY_COLUMNS = [
+    "Projet",
     "Libellé",
     "Niveau",
     "Enfants",
@@ -331,7 +334,7 @@ def styled_task_table(data: pd.DataFrame, visible_columns: list[str] | None = No
             level = int(level_value or 0)
         except (TypeError, ValueError):
             level = 0
-        separator = "border-top: 1px solid #d1d5db;" if level == 1 else ""
+        separator = "border-bottom: 1px solid #6b7280;" if level in {1, 2} else ""
         return [
             f"background-color: {color}; color: #111827; font-size: 13px; {separator} {text_style}"
             for _ in row
@@ -394,6 +397,7 @@ def project_label_for_id(options: dict[str, int], project_id: int | None) -> str
 def navigate_to_project_tasks(project_id: int) -> None:
     st.session_state["selected_project_id"] = project_id
     st.session_state["force_project_selector"] = True
+    st.session_state["force_tasks_project_id"] = project_id
     st.session_state["navigate_to_page"] = "Tâches et Gantt"
 
 
@@ -810,25 +814,50 @@ def task_grid_data(data: pd.DataFrame) -> pd.DataFrame:
     return grid_data
 
 
+def merge_task_grid_edits(full_data: pd.DataFrame, edited_visible: pd.DataFrame) -> pd.DataFrame:
+    if full_data.empty or edited_visible.empty or "ID" not in edited_visible.columns:
+        return full_data.copy()
+    merged = full_data.copy().set_index("ID", drop=False)
+    edited = edited_visible.copy().set_index("ID", drop=False)
+    common_ids = merged.index.intersection(edited.index)
+    common_columns = [column for column in edited.columns if column in merged.columns]
+    merged.loc[common_ids, common_columns] = edited.loc[common_ids, common_columns]
+    return merged.reset_index(drop=True)
+
+
 def task_editor(
     task_data: pd.DataFrame,
-    task_labels: dict[str, int],
-    budget_labels: dict[str, int],
-    project_id: int,
-) -> pd.DataFrame:
+    task_labels_by_project: dict[int, dict[str, int]],
+    budget_labels_by_project: dict[int, dict[str, int]],
+    project_key: str,
+    max_level: int,
+    collapsed_task_ids: set[int],
+    multi_project: bool,
+) -> tuple[pd.DataFrame, set[int], bool]:
     st.caption("Les lignes en Mode calcul = Agrégé sont recalculées depuis leurs sous-tâches à l'enregistrement.")
     task_level_legend()
     grid_data = task_grid_data(task_data)
+    valid_ids = {int(value) for value in grid_data.get("ID", pd.Series(dtype=int)).dropna().tolist()}
+    collapsed_task_ids = set(collapsed_task_ids) & valid_ids
+    grid_data["_Tree"] = ""
+    grid_data["_Collapsed"] = grid_data["ID"].apply(lambda value: int(value) in collapsed_task_ids)
+    grid_data["_Parent Options"] = grid_data["Projet ID"].apply(
+        lambda value: json.dumps([""] + list(task_labels_by_project.get(int(value), {}).keys()), ensure_ascii=False)
+    )
+    grid_data["_Budget Options"] = grid_data["Projet ID"].apply(
+        lambda value: json.dumps([""] + list(budget_labels_by_project.get(int(value), {}).keys()), ensure_ascii=False)
+    )
+    visible_grid_data = visible_task_rows(grid_data, max_level, collapsed_task_ids)
     row_style = JsCode(
         """
         function(params) {
             const level = Number(params.data.Niveau || 0);
             const base = {fontSize: '13px', color: '#111827'};
             if (level === 1) {
-                return {...base, backgroundColor: '#f3f4f6', fontWeight: '700', textDecoration: 'underline', borderTop: '1px solid #d1d5db'};
+                return {...base, backgroundColor: '#f3f4f6', fontWeight: '700', textDecoration: 'underline', borderBottom: '1px solid #6b7280'};
             }
             if (level === 2) {
-                return {...base, backgroundColor: '#fff8d6'};
+                return {...base, backgroundColor: '#fff8d6', borderBottom: '1px solid #6b7280'};
             }
             if (level === 3) {
                 return {...base, backgroundColor: '#e0f2fe', fontStyle: 'italic'};
@@ -840,10 +869,93 @@ def task_editor(
         }
         """
     )
+    tree_toggle_renderer = JsCode(
+        """
+        class TreeToggleRenderer {
+            init(params) {
+                this.params = params;
+                this.eGui = document.createElement('button');
+                this.eGui.type = 'button';
+                this.eGui.setAttribute('aria-label', 'Développer ou replier la tâche');
+                this.eGui.style.width = '24px';
+                this.eGui.style.height = '24px';
+                this.eGui.style.padding = '0';
+                this.eGui.style.border = '0';
+                this.eGui.style.background = 'transparent';
+                this.eGui.style.color = '#334155';
+                this.eGui.style.fontWeight = '700';
+                this.eGui.style.cursor = 'pointer';
+                if (Number(params.data.Enfants || 0) < 1) {
+                    this.eGui.style.visibility = 'hidden';
+                    return;
+                }
+                this.render();
+                this.clickHandler = (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const next = !Boolean(this.params.data._Collapsed);
+                    this.params.node.setDataValue('_Collapsed', next);
+                    this.params.data._Collapsed = next;
+                    this.render();
+                };
+                this.eGui.addEventListener('click', this.clickHandler);
+            }
+            render() {
+                this.eGui.textContent = this.params.data._Collapsed ? '+' : '−';
+                this.eGui.title = this.params.data._Collapsed ? 'Développer' : 'Replier';
+            }
+            getGui() { return this.eGui; }
+            refresh(params) {
+                this.params = params;
+                this.render();
+                return true;
+            }
+            destroy() {
+                if (this.clickHandler) this.eGui.removeEventListener('click', this.clickHandler);
+            }
+        }
+        """
+    )
+    row_options = JsCode(
+        """
+        function(params) {
+            const raw = params.data[params.colDef.field === 'Parent' ? '_Parent Options' : '_Budget Options'];
+            if (Array.isArray(raw)) return {values: raw};
+            try { return {values: JSON.parse(raw || '[""]')}; }
+            catch (error) { return {values: ['']}; }
+        }
+        """
+    )
     column_defs = [
         {"field": "ID", "hide": True, "editable": False},
         {"field": "Projet ID", "hide": True, "editable": False},
-        {"field": "Projet", "hide": True, "editable": False},
+        {"field": "Projet Code", "hide": True, "editable": False},
+        {"field": "Parent ID", "hide": True, "editable": False},
+        {"field": "_Collapsed", "hide": True, "editable": False},
+        {"field": "_Parent Options", "hide": True, "editable": False},
+        {"field": "_Budget Options", "hide": True, "editable": False},
+        {
+            "field": "_Tree",
+            "headerName": "",
+            "editable": False,
+            "pinned": "left",
+            "width": 42,
+            "minWidth": 42,
+            "maxWidth": 42,
+            "filter": False,
+            "sortable": False,
+            "resizable": False,
+            "cellRenderer": tree_toggle_renderer,
+        },
+        {
+            "field": "Projet",
+            "hide": not multi_project,
+            "editable": False,
+            "pinned": "left",
+            "width": 220,
+            "cellClass": "pv-left-cell",
+            "headerClass": "pv-left-header",
+        },
         {
             "field": "Libellé",
             "headerName": "Tâche",
@@ -875,14 +987,14 @@ def task_editor(
             "editable": True,
             "width": 260,
             "cellEditor": "agSelectCellEditor",
-            "cellEditorParams": {"values": [""] + list(task_labels.keys())},
+            "cellEditorParams": row_options,
         },
         {
             "field": "Budget",
             "editable": True,
             "width": 260,
             "cellEditor": "agSelectCellEditor",
-            "cellEditorParams": {"values": [""] + list(budget_labels.keys())},
+            "cellEditorParams": row_options,
         },
         {
             "field": "STARCOST",
@@ -920,18 +1032,24 @@ def task_editor(
         {"field": "Description", "editable": True, "width": 260},
     ]
     available_column_defs = [col for col in column_defs if col["field"] in grid_data.columns]
+    required_grid_columns = ["_Tree", "Projet", "Libellé", "Référence"] if multi_project else ["_Tree", "Libellé", "Référence"]
+    technical_grid_columns = {
+        "ID", "Projet ID", "Projet Code", "Parent ID", "_Collapsed", "_Parent Options", "_Budget Options"
+    }
+    if not multi_project:
+        technical_grid_columns.add("Projet")
     visible_columns = grid_column_visibility_selector(
         "tasks_grid",
         [column["field"] for column in available_column_defs if column.get("field")],
-        required_columns=["Libellé", "Référence"],
-        technical_columns={"ID", "Projet ID", "Projet"},
-        column_labels={"Libellé": "Tâche"},
+        required_columns=required_grid_columns,
+        technical_columns=technical_grid_columns,
+        column_labels={"_Tree": "Hiérarchie", "Libellé": "Tâche"},
     )
     column_defs = apply_aggrid_column_visibility(
         available_column_defs,
         visible_columns,
-        required_columns=["Libellé", "Référence"],
-        technical_columns={"ID", "Projet ID", "Projet"},
+        required_columns=required_grid_columns,
+        technical_columns=technical_grid_columns,
     )
     grid_options = {
         "columnDefs": column_defs,
@@ -953,9 +1071,9 @@ def task_editor(
         "suppressMovableColumns": False,
     }
     response = AgGrid(
-        grid_data,
+        visible_grid_data,
         gridOptions=grid_options,
-        height=compact_grid_height(len(grid_data), row_height=32, header_height=34, min_height=136, max_height=620),
+        height=compact_grid_height(len(visible_grid_data), row_height=32, header_height=34, min_height=136, max_height=620),
         data_return_mode=DataReturnMode.AS_INPUT,
         update_on=["cellValueChanged"],
         allow_unsafe_jscode=True,
@@ -964,9 +1082,17 @@ def task_editor(
         show_search=True,
         show_download_button=False,
         custom_css=TODAY_AGGRID_CSS,
-        key=f"tasks_grid_{project_id}",
+        key=f"tasks_grid_{project_key}",
     )
-    return aggrid_data(response, grid_data)
+    edited_visible = aggrid_data(response, visible_grid_data)
+    edited_full = merge_task_grid_edits(grid_data, edited_visible)
+    returned_collapsed = set()
+    for row in edited_full.to_dict("records"):
+        raw_collapsed = row.get("_Collapsed")
+        is_collapsed = raw_collapsed is True or str(raw_collapsed).strip().lower() in {"1", "true", "yes"}
+        if is_collapsed and int(row.get("Enfants") or 0) > 0:
+            returned_collapsed.add(int(row["ID"]))
+    return edited_full, returned_collapsed, returned_collapsed != collapsed_task_ids
 
 
 def weekly_timesheet_editor(
@@ -1392,26 +1518,27 @@ def time_recap_grid(data: pd.DataFrame, day_specs: list[dict[str, object]], key:
     )
 
 
-def task_tree(data: pd.DataFrame) -> tuple[list[dict], dict[str, list[dict]]]:
+def task_tree(data: pd.DataFrame) -> tuple[list[dict], dict[int, list[dict]]]:
     rows = data.to_dict("records")
-    existing_labels = {task_label(row) for row in rows}
-    children_by_parent: dict[str, list[dict]] = {}
+    existing_ids = {int(row["ID"]) for row in rows}
+    children_by_parent: dict[int, list[dict]] = {}
     roots: list[dict] = []
     for row in rows:
-        parent = str(row.get("Parent") or "").strip()
-        if parent and parent in existing_labels:
-            children_by_parent.setdefault(parent, []).append(row)
+        parent_value = row.get("Parent ID")
+        parent_id = int(parent_value) if pd.notna(parent_value) and parent_value not in (None, "") else None
+        if parent_id and parent_id in existing_ids:
+            children_by_parent.setdefault(parent_id, []).append(row)
         else:
             roots.append(row)
     return roots, children_by_parent
 
 
-def task_subtree(root: dict, children_by_parent: dict[str, list[dict]]) -> list[dict]:
+def task_subtree(root: dict, children_by_parent: dict[int, list[dict]]) -> list[dict]:
     rows: list[dict] = []
 
     def walk(row: dict) -> None:
         rows.append(row)
-        for child in children_by_parent.get(task_label(row), []):
+        for child in children_by_parent.get(int(row["ID"]), []):
             walk(child)
 
     walk(root)
@@ -1423,10 +1550,11 @@ def show_grouped_tasks(task_data: pd.DataFrame) -> None:
         st.info("Aucune tâche disponible.")
         return
     task_level_legend()
+    multi_project = task_data["Projet ID"].nunique() > 1 if "Projet ID" in task_data.columns else False
     visible_columns = grid_column_visibility_selector(
         "grouped_tasks_grid",
         [column for column in TASK_DISPLAY_COLUMNS if column in task_data.columns],
-        required_columns=["Libellé"],
+        required_columns=["Projet", "Libellé"] if multi_project else ["Libellé"],
         column_labels={"Libellé": "Tâche"},
     )
     st.dataframe(styled_task_table(task_data, visible_columns), use_container_width=True, hide_index=True)
@@ -1560,6 +1688,22 @@ def inject_css() -> None:
             max-height: 2.45rem !important;
             overflow: hidden !important;
             flex-wrap: nowrap !important;
+        }
+        .st-key-pv_sticky_header_tasks [data-baseweb="select"] {
+            height: 2.45rem !important;
+            max-height: 2.45rem !important;
+            overflow: hidden !important;
+        }
+        .st-key-pv_sticky_header_tasks [data-baseweb="select"] > div,
+        .st-key-pv_sticky_header_tasks [data-baseweb="select"] > div > div:first-child {
+            height: 2.45rem !important;
+            max-height: 2.45rem !important;
+            flex-wrap: nowrap !important;
+            overflow: hidden !important;
+        }
+        .st-key-pv_sticky_header_tasks [data-baseweb="tag"] {
+            flex: 0 0 auto !important;
+            max-width: 13rem !important;
         }
         [class*="st-key-pv_sticky_header_"] [data-baseweb="select"] span,
         [class*="st-key-pv_sticky_header_"] [data-baseweb="select"] input,
@@ -2156,26 +2300,107 @@ def show_projects() -> None:
 
 
 def show_tasks() -> None:
+    with session_scope() as session:
+        project_labels = project_options(session)
+        users = user_options(session)
+    if not project_labels:
+        header = sticky_page_header("tasks")
+        with header:
+            sticky_header_title("Tâches et Gantt")
+        st.warning("Créez d'abord un projet.")
+        return
+
+    project_label_list = list(project_labels.keys())
+    project_label_by_id = {project_id: label for label, project_id in project_labels.items()}
+    selector_key = "tasks_view_project_labels"
+    forced_project_id = st.session_state.pop("force_tasks_project_id", None)
+    forced_label = project_label_by_id.get(int(forced_project_id)) if forced_project_id else None
+    existing_selection = st.session_state.get(selector_key)
+    if forced_label:
+        st.session_state[selector_key] = [forced_label]
+    elif isinstance(existing_selection, list):
+        valid_selection = [label for label in existing_selection if label in project_labels]
+        st.session_state[selector_key] = valid_selection or [project_label_list[0]]
+    else:
+        default_label = project_label_by_id.get(int(st.session_state.get("selected_project_id") or 0))
+        st.session_state[selector_key] = [default_label or project_label_list[0]]
+
     header = sticky_page_header("tasks")
     with header:
-        title_col, filter_col, color_col = st.columns([1.1, 2.1, 1.05], vertical_alignment="center")
+        title_col, filter_col, active_col, color_col = st.columns([1.25, 2.3, 1.45, 1.15], vertical_alignment="center")
         with title_col:
             sticky_header_title("Tâches et Gantt")
         with filter_col:
-            project_id = select_project()
+            current_project_count = len(st.session_state.get(selector_key, []))
+            with st.popover(f"Projets ({current_project_count})", width="stretch"):
+                selected_project_labels = st.multiselect("Projets affichés", project_label_list, key=selector_key)
+        active_placeholder = active_col.empty()
         color_placeholder = color_col.empty()
-    if not project_id:
+    if not selected_project_labels:
+        st.warning("Sélectionnez au moins un projet pour afficher ses tâches.")
         return
+
+    selected_project_ids = [project_labels[label] for label in selected_project_labels]
+    active_key = "tasks_active_project_label"
+    current_active = st.session_state.get(active_key)
+    if current_active not in selected_project_labels:
+        preferred = project_label_by_id.get(int(st.session_state.get("selected_project_id") or 0))
+        st.session_state[active_key] = preferred if preferred in selected_project_labels else selected_project_labels[0]
+    with active_placeholder:
+        active_project_label = st.selectbox(
+            "Projet actif",
+            selected_project_labels,
+            key=active_key,
+            disabled=len(selected_project_labels) == 1,
+        )
+    active_project_id = project_labels[active_project_label]
+    st.session_state["selected_project_id"] = active_project_id
+    project_key = "_".join(str(project_id) for project_id in sorted(selected_project_ids))
+
     with session_scope() as session:
-        task_data = tasks_df(session, project_id)
-        deps = dependencies_df(session, project_id)
-        assignments = assignments_df(session, project_id)
-        users = user_options(session)
-        task_labels = task_options(session, project_id)
-        budget_labels = budget_options(session, project_id)
+        fresh_task_data = tasks_df(session, project_ids=selected_project_ids)
+        deps = dependencies_df(session, project_ids=selected_project_ids)
+        assignments = assignments_df(session, project_ids=selected_project_ids)
+        task_labels_by_project = {project_id: task_options(session, project_id) for project_id in selected_project_ids}
+        budget_labels_by_project = {project_id: budget_options(session, project_id) for project_id in selected_project_ids}
+    task_labels = task_labels_by_project[active_project_id]
+    budget_labels = budget_labels_by_project[active_project_id]
+    active_task_data = fresh_task_data.loc[fresh_task_data["Projet ID"] == active_project_id].copy()
+
+    draft_key = f"tasks_draft_{project_key}"
+    draft_data = st.session_state.get(draft_key)
+    if isinstance(draft_data, pd.DataFrame) and set(draft_data.get("ID", [])) == set(fresh_task_data.get("ID", [])):
+        task_data = draft_data.copy()
+    else:
+        task_data = fresh_task_data.copy()
+        st.session_state[draft_key] = task_data.copy()
+
     with color_placeholder:
         color_options = task_color_options(task_data)
-        color_field = st.selectbox("Colorer les tâches par", color_options or ["Temps prévu"], index=0)
+        color_field = st.selectbox(
+            "Colorer les tâches par",
+            color_options or ["Temps prévu"],
+            index=0,
+            key=f"tasks_color_{project_key}",
+        )
+
+    level_labels = ["Niveau 1", "Niveau 2", "Niveau 3", "Niveau 4"]
+    level_key = "tasks_visible_depth"
+    if st.session_state.get(level_key) not in level_labels:
+        st.session_state[level_key] = "Niveau 4"
+    selected_depth_label = st.segmented_control(
+        "Profondeur affichée",
+        level_labels,
+        key=level_key,
+        selection_mode="single",
+    ) or "Niveau 4"
+    max_level = level_labels.index(selected_depth_label) + 1
+    collapse_key = "tasks_collapsed_task_ids"
+    valid_task_ids = {int(value) for value in task_data.get("ID", pd.Series(dtype=int)).dropna().tolist()}
+    collapsed_task_ids = {
+        int(value) for value in st.session_state.get(collapse_key, []) if int(value) in valid_task_ids
+    }
+    st.session_state[collapse_key] = sorted(collapsed_task_ids)
 
     gantt_tab, grouped_tab, create_tab, task_budget_tab, deps_tab, assign_tab = sticky_tabs(
         "tasks",
@@ -2186,13 +2411,29 @@ def show_tasks() -> None:
         st.subheader("Gantt tâches")
         gantt_container = st.container()
         st.subheader("Table tâches")
-        save_tasks = top_right_save_button(f"tasks_save_{project_id}")
-        edited_tasks = task_editor(task_data, task_labels, budget_labels, project_id)
+        save_tasks = top_right_save_button(f"tasks_save_{project_key}")
+        edited_tasks, returned_collapsed, collapse_changed = task_editor(
+            task_data,
+            task_labels_by_project,
+            budget_labels_by_project,
+            project_key,
+            max_level,
+            collapsed_task_ids,
+            len(selected_project_ids) > 1,
+        )
+        st.session_state[draft_key] = edited_tasks.copy()
+        if collapse_changed:
+            st.session_state[collapse_key] = sorted(returned_collapsed)
+            st.rerun()
+        visible_tasks = visible_task_rows(edited_tasks, max_level, returned_collapsed)
         with gantt_container:
-            st.plotly_chart(gantt_figure(edited_tasks, color_field), width="stretch")
+            st.plotly_chart(
+                gantt_figure(visible_tasks, color_field, multi_project=len(selected_project_ids) > 1),
+                width="stretch",
+            )
         if not deps.empty:
             st.caption("Dépendances")
-            deps_display = deps[["Prédécesseur", "Successeur", "Type", "Décalage"]]
+            deps_display = deps[["Projet", "Prédécesseur", "Successeur", "Type", "Décalage"]]
             deps_visible_columns = grid_column_visibility_selector(
                 "task_gantt_dependencies_grid",
                 list(deps_display.columns),
@@ -2206,16 +2447,17 @@ def show_tasks() -> None:
         if save_tasks:
             try:
                 with session_scope() as session:
-                    update_tasks_from_df(session, edited_tasks, project_id)
+                    update_tasks_from_projects_df(session, edited_tasks, selected_project_ids)
+                st.session_state.pop(draft_key, None)
                 st.success("Tâches mises à jour, budgets recalculés.")
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
 
-        delete_record_control("task", task_data, ["Référence", "Titre"], f"tasks_{project_id}")
+        delete_record_control("task", task_data, ["Projet", "Référence", "Titre"], f"tasks_{project_key}")
 
     with grouped_tab:
-        show_grouped_tasks(task_data)
+        show_grouped_tasks(visible_tasks)
 
     with create_tab:
         with st.form("task_form"):
@@ -2242,7 +2484,7 @@ def show_tasks() -> None:
                 with session_scope() as session:
                     create_task(
                         session,
-                        project_id,
+                        active_project_id,
                         budget_labels.get(budget_label),
                         title,
                         level,
@@ -2265,8 +2507,8 @@ def show_tasks() -> None:
                 st.error(str(exc))
 
     with task_budget_tab:
-        if task_data.empty:
-            st.info("Aucune tâche disponible.")
+        if active_task_data.empty:
+            st.info("Aucune tâche disponible dans le projet actif.")
         else:
             with st.form("task_budget_form"):
                 task_label = st.selectbox("Tâche", list(task_labels.keys()))
@@ -2291,17 +2533,22 @@ def show_tasks() -> None:
                         budget_labels.get(budget_label),
                         actual_expense,
                     )
+                st.session_state.pop(draft_key, None)
                 st.success("Budget de tâche mis à jour et budget projet recalculé.")
                 st.rerun()
 
     with deps_tab:
-        with st.form("dependency_form"):
-            c1, c2, c3, c4 = st.columns([3, 3, 2, 1])
-            pred_label = c1.selectbox("Prédécesseur", list(task_labels.keys()))
-            succ_label = c2.selectbox("Successeur", list(task_labels.keys()))
-            link_type = c3.selectbox("Type", ["Fin-Début", "Début-Début", "Fin-Fin"])
-            lag_days = c4.number_input("Décalage", value=0, step=1)
-            submitted = st.form_submit_button("Ajouter le lien")
+        submitted = False
+        if len(task_labels) < 2:
+            st.info("Le projet actif doit contenir au moins deux tâches pour créer une dépendance.")
+        else:
+            with st.form("dependency_form"):
+                c1, c2, c3, c4 = st.columns([3, 3, 2, 1])
+                pred_label = c1.selectbox("Prédécesseur", list(task_labels.keys()))
+                succ_label = c2.selectbox("Successeur", list(task_labels.keys()))
+                link_type = c3.selectbox("Type", ["Fin-Début", "Début-Début", "Fin-Fin"])
+                lag_days = c4.number_input("Décalage", value=0, step=1)
+                submitted = st.form_submit_button("Ajouter le lien")
         if submitted:
             try:
                 with session_scope() as session:
@@ -2316,7 +2563,7 @@ def show_tasks() -> None:
         if deps.empty:
             st.info("Aucune dépendance.")
         else:
-            deps_display = deps[["Prédécesseur", "Successeur", "Type", "Décalage"]]
+            deps_display = deps[["Projet", "Prédécesseur", "Successeur", "Type", "Décalage"]]
             deps_visible_columns = grid_column_visibility_selector(
                 "task_dependencies_grid",
                 list(deps_display.columns),
@@ -2327,22 +2574,27 @@ def show_tasks() -> None:
                 width="stretch",
                 hide_index=True,
             )
-            delete_record_control("dependency", deps, ["Prédécesseur", "Successeur"], f"dependencies_{project_id}")
+            delete_record_control("dependency", deps, ["Projet", "Prédécesseur", "Successeur"], f"dependencies_{project_key}")
 
     with assign_tab:
-        with st.form("assignment_form"):
-            c1, c2 = st.columns(2)
-            task_label = c1.selectbox("Tâche", list(task_labels.keys()))
-            user_label = c2.selectbox("Utilisateur", list(users.keys()))
-            c3, c4, c5 = st.columns(3)
-            role = c3.text_input("Rôle", value="Contributeur")
-            planned_hours = c4.number_input("Charge prévue", min_value=0.0, step=1.0)
-            cost_rate = c5.number_input("Taux horaire", min_value=0.0, value=85.0, step=5.0)
-            submitted = st.form_submit_button("Affecter")
+        submitted = False
+        if not task_labels:
+            st.info("Aucune tâche disponible dans le projet actif.")
+        else:
+            with st.form("assignment_form"):
+                c1, c2 = st.columns(2)
+                task_label = c1.selectbox("Tâche", list(task_labels.keys()))
+                user_label = c2.selectbox("Utilisateur", list(users.keys()))
+                c3, c4, c5 = st.columns(3)
+                role = c3.text_input("Rôle", value="Contributeur")
+                planned_hours = c4.number_input("Charge prévue", min_value=0.0, step=1.0)
+                cost_rate = c5.number_input("Taux horaire", min_value=0.0, value=85.0, step=5.0)
+                submitted = st.form_submit_button("Affecter")
         if submitted:
             try:
                 with session_scope() as session:
                     add_assignment(session, task_labels[task_label], users[user_label], role, planned_hours, cost_rate)
+                st.session_state.pop(draft_key, None)
                 st.success("Affectation ajoutée.")
                 st.rerun()
             except IntegrityError:
@@ -2355,14 +2607,14 @@ def show_tasks() -> None:
                 "assignments_grid",
                 list(assignments.columns),
                 required_columns=["Tâche", "Utilisateur"],
-                technical_columns={"ID", "Tâche ID", "Utilisateur ID"},
+                technical_columns={"ID", "Projet ID", "Tâche ID", "Utilisateur ID"},
             )
             st.dataframe(
                 styled_plain_table(assignments[visible_columns_for_editor(assignments, assignments_visible_columns)]),
                 width="stretch",
                 hide_index=True,
             )
-            delete_record_control("assignment", assignments, ["Tâche", "Utilisateur"], f"assignments_{project_id}")
+            delete_record_control("assignment", assignments, ["Projet", "Tâche", "Utilisateur"], f"assignments_{project_key}")
 
 
 def legacy_show_timesheet() -> None:

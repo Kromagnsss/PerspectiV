@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+from collections.abc import Collection
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -107,6 +108,12 @@ def user_options(session: Session) -> dict[str, int]:
 def project_options(session: Session) -> dict[str, int]:
     projects = session.scalars(select(Project).order_by(Project.code)).all()
     return {f"{p.code} - {p.name}": p.id for p in projects}
+
+
+def _project_ids(project_id: int | None, project_ids: Collection[int] | None) -> list[int]:
+    if project_ids is not None:
+        return list(dict.fromkeys(int(value) for value in project_ids))
+    return [int(project_id)] if project_id else []
 
 
 def user_name_options(session: Session) -> dict[str, int]:
@@ -568,6 +575,14 @@ def create_task(
     starcost: bool,
     description: str,
 ) -> Task:
+    if parent_id:
+        parent = session.get(Task, parent_id)
+        if not parent or parent.project_id != project_id:
+            raise ValueError("La tâche parente doit appartenir au même projet.")
+    if budget_id:
+        budget = session.get(Budget, budget_id)
+        if not budget or budget.project_id != project_id:
+            raise ValueError("Le budget doit appartenir au même projet que la tâche.")
     max_order = session.scalar(select(func.max(Task.sort_order)).where(Task.project_id == project_id)) or 0
     task = Task(
         project_id=project_id,
@@ -614,6 +629,10 @@ def update_task_budget_and_expense(
     task = session.get(Task, task_id)
     if not task:
         raise ValueError("Tâche introuvable.")
+    if budget_id:
+        budget = session.get(Budget, budget_id)
+        if not budget or budget.project_id != task.project_id:
+            raise ValueError("Le budget doit appartenir au même projet que la tâche.")
     task.budget_id = budget_id
     task.actual_expense_amount = Decimal(str(actual_expense_amount))
     recompute_actuals(session)
@@ -636,6 +655,12 @@ def add_assignment(session: Session, task_id: int, user_id: int, role: str, plan
 def add_dependency(session: Session, predecessor_id: int, successor_id: int, link_type: str, lag_days: int) -> None:
     if predecessor_id == successor_id:
         raise ValueError("Une tâche ne peut pas dépendre d'elle-même.")
+    predecessor = session.get(Task, predecessor_id)
+    successor = session.get(Task, successor_id)
+    if not predecessor or not successor:
+        raise ValueError("Tâche de dépendance introuvable.")
+    if predecessor.project_id != successor.project_id:
+        raise ValueError("Une dépendance ne peut relier que des tâches du même projet.")
     session.add(
         TaskDependency(
             predecessor_id=predecessor_id,
@@ -718,14 +743,22 @@ def projects_df(session: Session) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def tasks_df(session: Session, project_id: int | None = None) -> pd.DataFrame:
+def tasks_df(
+    session: Session,
+    project_id: int | None = None,
+    *,
+    project_ids: Collection[int] | None = None,
+) -> pd.DataFrame:
     stmt = (
         select(Task, Project.code, Project.name)
         .join(Project, Task.project_id == Project.id)
         .order_by(Task.project_id, Task.sort_order, Task.reference)
     )
-    if project_id:
-        stmt = stmt.where(Task.project_id == project_id)
+    selected_project_ids = _project_ids(project_id, project_ids)
+    if project_ids is not None and not selected_project_ids:
+        return pd.DataFrame()
+    if selected_project_ids:
+        stmt = stmt.where(Task.project_id.in_(selected_project_ids))
     records = session.execute(stmt).all()
     project_meta: dict[int, tuple[str, str]] = {}
     tasks_by_id: dict[int, Task] = {}
@@ -812,6 +845,7 @@ def tasks_df(session: Session, project_id: int | None = None) -> pd.DataFrame:
             {
                 "ID": task.id,
                 "Projet ID": task.project_id,
+                "Projet Code": project_code,
                 "Projet": f"{project_code} - {project_name}",
                 "Référence": task.reference,
                 "Titre": task.title,
@@ -820,6 +854,7 @@ def tasks_df(session: Session, project_id: int | None = None) -> pd.DataFrame:
                 "Enfants": child_count,
                 "Mode calcul": "Agrégé" if child_count else "Direct",
                 "Parent": parent_ref,
+                "Parent ID": task.parent_id,
                 "Budget": budget_label,
                 "STARCOST": bool(task.starcost),
                 "Statut": task.status,
@@ -842,7 +877,52 @@ def tasks_df(session: Session, project_id: int | None = None) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def dependencies_df(session: Session, project_id: int | None = None) -> pd.DataFrame:
+def visible_task_rows(
+    data: pd.DataFrame,
+    max_level: int = 4,
+    collapsed_task_ids: Collection[int] | None = None,
+) -> pd.DataFrame:
+    """Return the visible hierarchy without discarding columns or reordering rows."""
+    if data.empty:
+        return data.copy()
+    collapsed = {int(value) for value in (collapsed_task_ids or [])}
+    parent_by_id: dict[int, int | None] = {}
+    project_by_id: dict[int, int | None] = {}
+    for row in data.to_dict("records"):
+        task_id = int(row["ID"])
+        parent_value = row.get("Parent ID")
+        parent_by_id[task_id] = int(parent_value) if pd.notna(parent_value) and parent_value not in (None, "") else None
+        project_value = row.get("Projet ID")
+        project_by_id[task_id] = int(project_value) if pd.notna(project_value) and project_value not in (None, "") else None
+
+    def is_visible(row: pd.Series) -> bool:
+        try:
+            if int(row.get("Niveau") or 1) > max(1, min(int(max_level), 4)):
+                return False
+            task_id = int(row["ID"])
+        except (TypeError, ValueError):
+            return False
+        project_id = project_by_id.get(task_id)
+        current = parent_by_id.get(task_id)
+        seen = {task_id}
+        while current is not None and current not in seen:
+            if current in collapsed:
+                return False
+            if project_by_id.get(current) != project_id:
+                break
+            seen.add(current)
+            current = parent_by_id.get(current)
+        return True
+
+    return data.loc[data.apply(is_visible, axis=1)].copy()
+
+
+def dependencies_df(
+    session: Session,
+    project_id: int | None = None,
+    *,
+    project_ids: Collection[int] | None = None,
+) -> pd.DataFrame:
     pred = Task.__table__.alias("pred")
     succ = Task.__table__.alias("succ")
     project = Project.__table__
@@ -857,6 +937,7 @@ def dependencies_df(session: Session, project_id: int | None = None) -> pd.DataF
             succ.c.title.label("successor_title"),
             TaskDependency.link_type,
             TaskDependency.lag_days,
+            succ.c.project_id.label("project_id"),
             project.c.code,
         )
         .join(pred, TaskDependency.predecessor_id == pred.c.id)
@@ -864,13 +945,18 @@ def dependencies_df(session: Session, project_id: int | None = None) -> pd.DataF
         .join(project, succ.c.project_id == project.c.id)
         .order_by(project.c.code, pred.c.reference)
     )
-    if project_id:
-        stmt = stmt.where(succ.c.project_id == project_id)
+    selected_project_ids = _project_ids(project_id, project_ids)
+    if project_ids is not None and not selected_project_ids:
+        return pd.DataFrame()
+    if selected_project_ids:
+        stmt = stmt.where(succ.c.project_id.in_(selected_project_ids))
     rows = []
     for row in session.execute(stmt):
         rows.append(
             {
                 "ID": row.id,
+                "Projet ID": row.project_id,
+                "Projet": row.code,
                 "Prédécesseur ID": row.predecessor_id,
                 "Successeur ID": row.successor_id,
                 "Prédécesseur": f"{row.predecessor_ref} - {row.predecessor_title}",
@@ -882,22 +968,31 @@ def dependencies_df(session: Session, project_id: int | None = None) -> pd.DataF
     return pd.DataFrame(rows)
 
 
-def assignments_df(session: Session, project_id: int | None = None) -> pd.DataFrame:
+def assignments_df(
+    session: Session,
+    project_id: int | None = None,
+    *,
+    project_ids: Collection[int] | None = None,
+) -> pd.DataFrame:
     stmt = (
-        select(TaskAssignment, Project.code, Project.name, Task.reference, Task.title, User.full_name)
+        select(TaskAssignment, Task.project_id, Project.code, Project.name, Task.reference, Task.title, User.full_name)
         .join(Task, TaskAssignment.task_id == Task.id)
         .join(Project, Task.project_id == Project.id)
         .join(User, TaskAssignment.user_id == User.id)
         .order_by(Project.code, Task.reference, User.full_name)
     )
-    if project_id:
-        stmt = stmt.where(Task.project_id == project_id)
+    selected_project_ids = _project_ids(project_id, project_ids)
+    if project_ids is not None and not selected_project_ids:
+        return pd.DataFrame()
+    if selected_project_ids:
+        stmt = stmt.where(Task.project_id.in_(selected_project_ids))
 
     rows = []
-    for assignment, project_code, project_name, task_ref, task_title, user_name in session.execute(stmt):
+    for assignment, project_id_value, project_code, project_name, task_ref, task_title, user_name in session.execute(stmt):
         rows.append(
             {
                 "ID": assignment.id,
+                "Projet ID": project_id_value,
                 "Projet": f"{project_code} - {project_name}",
                 "Tâche": f"{task_ref} - {task_title}",
                 "Utilisateur": user_name,
@@ -1358,21 +1453,29 @@ def update_projects_from_df(session: Session, data: pd.DataFrame) -> None:
         project.description = _text(row.get("Description")) or None
 
 
-def update_tasks_from_df(session: Session, data: pd.DataFrame, project_id: int) -> None:
+def _update_task_rows(session: Session, data: pd.DataFrame, project_id: int) -> None:
     budgets = budget_options(session, project_id)
     task_labels = task_options(session, project_id)
     for row in data.to_dict("records"):
         task = session.get(Task, int(row["ID"]))
         if not task:
             continue
+        if task.project_id != project_id or int(row.get("Projet ID") or project_id) != project_id:
+            raise ValueError("Une tâche ne peut pas être déplacée vers un autre projet depuis la grille.")
         parent_value = _text(row.get("Parent"))
         parent_id = task_labels.get(parent_value)
+        if parent_value and parent_id is None:
+            raise ValueError(f"Le parent de {task.reference} doit appartenir au même projet.")
         if parent_id == task.id:
             raise ValueError(f"La tâche {task.reference} ne peut pas être son propre parent.")
+        budget_value = _text(row.get("Budget"))
+        budget_id = budgets.get(budget_value)
+        if budget_value and budget_id is None:
+            raise ValueError(f"Le budget de {task.reference} doit appartenir au même projet.")
         task.title = _text(row.get("Titre")) or task.title
         task.level = min(max(_int(row.get("Niveau")), 1), 4)
         task.parent_id = parent_id
-        task.budget_id = budgets.get(_text(row.get("Budget")))
+        task.budget_id = budget_id
         task.starcost = _bool(row.get("STARCOST"))
         task.status = _text(row.get("Statut")) or task.status
         task.priority = _text(row.get("Priorité")) or task.priority
@@ -1384,7 +1487,28 @@ def update_tasks_from_df(session: Session, data: pd.DataFrame, project_id: int) 
         task.actual_expense_amount = Decimal(str(_float(row.get("Dépense directe"))))
         task.progress = min(max(_int(row.get("Avancement")), 0), 100)
         task.description = _text(row.get("Description")) or None
+
+
+def update_tasks_from_df(session: Session, data: pd.DataFrame, project_id: int) -> None:
+    _update_task_rows(session, data, project_id)
     validate_task_tree(session, project_id)
+    recompute_actuals(session)
+
+
+def update_tasks_from_projects_df(session: Session, data: pd.DataFrame, project_ids: Collection[int]) -> None:
+    allowed_project_ids = set(_project_ids(None, project_ids))
+    if not allowed_project_ids:
+        return
+    row_project_ids = {
+        int(value)
+        for value in data.get("Projet ID", pd.Series(dtype=int)).dropna().tolist()
+    }
+    if not row_project_ids.issubset(allowed_project_ids):
+        raise ValueError("La grille contient une tâche d'un projet non sélectionné.")
+    for project_id in sorted(row_project_ids):
+        project_rows = data.loc[pd.to_numeric(data["Projet ID"], errors="coerce") == project_id]
+        _update_task_rows(session, project_rows, project_id)
+        validate_task_tree(session, project_id)
     recompute_actuals(session)
 
 

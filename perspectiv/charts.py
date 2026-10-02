@@ -177,7 +177,7 @@ def projects_gantt(projects: pd.DataFrame, color_field: str = "Budget") -> go.Fi
     return fig
 
 
-def gantt_figure(tasks: pd.DataFrame, color_field: str = "Temps prévu") -> go.Figure:
+def gantt_figure(tasks: pd.DataFrame, color_field: str = "Temps prévu", *, multi_project: bool = False) -> go.Figure:
     if tasks.empty:
         return empty_figure("Aucune tâche à afficher")
     df = tasks.dropna(subset=["Début", "Fin estimée"]).copy()
@@ -187,7 +187,13 @@ def gantt_figure(tasks: pd.DataFrame, color_field: str = "Temps prévu") -> go.F
     df["Début"] = pd.to_datetime(df["Début"])
     df["Progression"] = df["Avancement"].astype(str) + "%"
     df["Ligne Gantt"] = range(len(df))
-    df["Libellé Gantt"] = df.apply(lambda row: task_level_annotation(row.get("Libellé"), row.get("Niveau")), axis=1)
+    def gantt_label(row: pd.Series) -> str:
+        label = row.get("Libellé")
+        if multi_project and row.get("Projet Code"):
+            label = f"{row.get('Projet Code')} · {label}"
+        return task_level_annotation(label, row.get("Niveau"))
+
+    df["Libellé Gantt"] = df.apply(gantt_label, axis=1)
     if color_field not in df.columns:
         color_field = "Temps prévu" if "Temps prévu" in df.columns else "Statut"
     if color_field in df.columns and color_field != "Statut":
@@ -273,18 +279,33 @@ def gantt_figure(tasks: pd.DataFrame, color_field: str = "Temps prévu") -> go.F
             level = int(row.get("Niveau") or 0)
         except (TypeError, ValueError):
             level = 0
-        if level == 1:
+        if level in {1, 2}:
             fig.add_shape(
                 type="line",
                 xref="paper",
                 x0=0,
                 x1=1,
                 yref="y",
-                y0=row["Ligne Gantt"] - 0.5,
-                y1=row["Ligne Gantt"] - 0.5,
-                line=dict(color="#d1d5db", width=0.6),
+                y0=row["Ligne Gantt"] + 0.5,
+                y1=row["Ligne Gantt"] + 0.5,
+                line=dict(color="#6b7280", width=1),
                 layer="below",
             )
+    if multi_project and "Projet ID" in df.columns:
+        project_values = df["Projet ID"].tolist()
+        for index in range(len(project_values) - 1):
+            if project_values[index] != project_values[index + 1]:
+                fig.add_shape(
+                    type="line",
+                    xref="paper",
+                    x0=0,
+                    x1=1,
+                    yref="y",
+                    y0=index + 0.5,
+                    y1=index + 0.5,
+                    line=dict(color="#374151", width=1.4),
+                    layer="below",
+                )
     fig.update_layout(
         height=max(170, min(820, GANTT_VERTICAL_CHROME_PX + len(df) * GANTT_ROW_HEIGHT_PX)),
         margin=dict(l=20, r=20, t=70, b=20),

@@ -180,6 +180,10 @@ def navigate(page, nav_pattern: re.Pattern[str], header_selector: str | None = N
         page.wait_for_load_state("networkidle", timeout=5000)
     except PlaywrightTimeoutError:
         pass
+    main = page.locator('[data-testid="stMain"]').first
+    if main.count() > 0:
+        main.evaluate("el => el.scrollTo(0, 0)")
+        page.wait_for_timeout(300)
 
 
 def visible_box(locator) -> dict[str, float] | None:
@@ -275,6 +279,95 @@ def inspect_page(page, spec: dict[str, Any], report: VisualReport) -> None:
                 {"box": popover_box, "z_index": z_index, "viewport": VIEWPORT},
             )
             page.keyboard.press("Escape")
+
+    if slug == "tasks":
+        for level in range(1, 5):
+            control = page.get_by_text(f"Niveau {level}", exact=True).first
+            report.check(
+                f"tasks: level {level} control visible",
+                visible_box(control) is not None,
+            )
+        task_title = header.get_by_text("Tâches et Gantt", exact=True).first
+        title_box = visible_box(task_title)
+        first_filter = header.get_by_role("button", name=re.compile(r"^Projets \(")).first
+        filter_box = visible_box(first_filter)
+        report.check(
+            "tasks: title not clipped by project filter",
+            title_box is not None and filter_box is not None and box_right(title_box) + 8 <= filter_box["x"],
+            {"title": title_box, "filter": filter_box},
+        )
+
+        table_anchor = page.get_by_text("Table tâches", exact=True).first
+        table_anchor.scroll_into_view_if_needed(timeout=10000)
+        table_anchor.evaluate("el => el.scrollIntoView({block: 'start'})")
+        page.mouse.wheel(0, 360)
+        page.wait_for_timeout(1200)
+        grid_path = report.out_dir / safe_filename(slug, "grid")
+        page.screenshot(path=str(grid_path), full_page=False)
+        report.capture("tasks_grid", grid_path)
+
+        tree_toggle_count = 0
+        for frame in page.frames:
+            tree_toggle_count += frame.locator('button[title="Replier"], button[title="Développer"]').count()
+        report.check(
+            "tasks: hierarchy toggles rendered",
+            tree_toggle_count > 0,
+            {"count": tree_toggle_count},
+        )
+        component_error = page.get_by_text("Component Error", exact=False)
+        report.check(
+            "tasks: no component error",
+            component_error.count() == 0,
+            {"count": component_error.count()},
+        )
+
+        try:
+            project_button = header.get_by_role("button", name=re.compile(r"^Projets \(")).first
+            project_button.click(timeout=5000)
+            page.wait_for_timeout(400)
+            project_selector = page.locator('[data-testid="stPopoverBody"] [role="combobox"]').first
+            project_selector.click(timeout=5000)
+            page.keyboard.press("ArrowDown")
+            page.keyboard.press("Enter")
+            page.get_by_text("Gantt tâches", exact=True).first.wait_for(state="visible", timeout=20000)
+            page.get_by_text("Table tâches", exact=True).first.wait_for(state="visible", timeout=20000)
+            page.wait_for_timeout(3000)
+            active_project_selector = header.locator('[role="combobox"]').first
+            active_enabled = active_project_selector.is_enabled(timeout=3000)
+            multi_header_box = visible_box(header)
+            report.check(
+                "tasks: multi-project selection active",
+                active_enabled,
+                {"active_project_enabled": active_enabled},
+            )
+            report.check(
+                "tasks: multi-project header stays compact",
+                multi_header_box is not None and multi_header_box["height"] <= 100,
+                {"box": multi_header_box},
+            )
+
+            table_anchor = page.get_by_text("Table tâches", exact=True).first
+            table_anchor.evaluate("el => el.scrollIntoView({block: 'start'})")
+            page.mouse.wheel(0, 360)
+            page.wait_for_timeout(1800)
+            project_header_count = 0
+            for frame in page.frames:
+                project_header_count += frame.get_by_text("Projet", exact=True).count()
+            multi_path = report.out_dir / safe_filename(slug, "multi_project")
+            page.screenshot(path=str(multi_path), full_page=False)
+            report.capture("tasks_multi_project", multi_path)
+            report.check(
+                "tasks: project column visible in multi-project grid",
+                project_header_count > 0,
+                {"count": project_header_count},
+            )
+        except Exception as exc:
+            report.check("tasks: multi-project scenario", False, {"error": str(exc)})
+
+        main = page.locator('[data-testid="stMain"]').first
+        if main.count() > 0:
+            main.evaluate("el => el.scrollTo(0, 0)")
+        page.wait_for_timeout(300)
 
 
 def parse_args() -> argparse.Namespace:

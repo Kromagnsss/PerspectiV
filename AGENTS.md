@@ -32,3 +32,4 @@ Utilise cette nouvelle entrée pour traiter le prompt.
 - Une migration de reprise doit detecter un schema deja cree mais non marque dans Alembic, valider ses colonnes avant de le reutiliser et refuser clairement tout etat partiel; l'updater doit permettre de choisir explicitement la sauvegarde a restaurer.
 - Apres un redemarrage de service, effectuer le healthcheck avec une boucle d'attente qui tolere explicitement les connexions refusees pendant l'initialisation; ne jamais declencher un rollback sur le premier refus de connexion.
 - Pour tout module de gestion des risques, centraliser la cotation et les regles d'acceptation dans la couche metier, tracer chaque iteration et verification, et conserver des liens coherents vers les projets et leurs taches.
+- Toute vue hierarchique multi-projet doit synchroniser ses filtres et replis entre tableaux et graphiques, preserver les donnees masquees et interdire les relations entre projets.
