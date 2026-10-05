@@ -26,7 +26,7 @@ La nouvelle version remplace l'interface Access par une application Streamlit lo
 - edition directe des tables projets, taches, timesheet, budget et utilisateurs via des grilles sauvegardees en base.
 - table projets liee a un Gantt interactif, avec mise a jour automatique depuis les dates modifiees, boutons de plage et coloration par champ numerique.
 - onglet taches avec Gantt interactif pleine largeur, coloration par champ numerique et table editable dessous.
-- vue groupee des taches avec couleurs pastel par niveau, regroupement parent/enfants et lignes parentes calculees depuis leurs sous-taches.
+- hierarchie de taches sur six niveaux avec palette progressive commune au Gantt et aux grilles, filtres de profondeur, regroupement parent/enfants et lignes parentes calculees depuis leurs sous-taches.
 - gestion des risques par projet avec analyses versionnees, matrice 5 x 5 issue du PRA, cotations initiales et residuelles, iterations de reduction liees aux taches, verification des preuves et decision humaine d'acceptation.
 - exposition du registre des risques dans l'interface, l'API REST, le connecteur MCP, le tableau de bord et les rapports PDF.
 

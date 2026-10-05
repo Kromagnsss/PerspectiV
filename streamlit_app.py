@@ -32,6 +32,11 @@ from perspectiv.database import init_db, session_scope
 from perspectiv.models import Risk, RiskAssessment, RiskIteration, User
 from perspectiv.reports import build_project_pdf
 from perspectiv.settings import OIDC_ISSUER
+from perspectiv.task_hierarchy import (
+    MAX_TASK_LEVEL,
+    STRUCTURING_TASK_LEVELS,
+    TASK_LEVEL_STYLES,
+)
 from perspectiv.services import (
     add_assignment,
     add_budget,
@@ -148,17 +153,18 @@ PAGE_ICONS = {
 }
 
 LEVEL_COLORS = {
-    1: "#f3f4f6",
-    2: "#fff8d6",
-    3: "#e0f2fe",
-    4: "#ffffff",
+    level: str(style["background_color"])
+    for level, style in TASK_LEVEL_STYLES.items()
 }
 
 LEVEL_TEXT_STYLES = {
-    1: "font-weight: 700; text-decoration: underline;",
-    2: "",
-    3: "font-style: italic;",
-    4: "font-style: italic; font-size: 12px;",
+    level: (
+        f"font-weight: {style['font_weight']}; "
+        f"font-style: {style['font_style']}; "
+        f"font-size: {style['font_size']}px; "
+        f"text-decoration: {style['text_decoration']};"
+    )
+    for level, style in TASK_LEVEL_STYLES.items()
 }
 
 DAY_INITIALS = ["L", "M", "M", "J", "V", "S", "D"]
@@ -334,7 +340,7 @@ def styled_task_table(data: pd.DataFrame, visible_columns: list[str] | None = No
             level = int(level_value or 0)
         except (TypeError, ValueError):
             level = 0
-        separator = "border-bottom: 1px solid #6b7280;" if level in {1, 2} else ""
+        separator = "border-bottom: 1px solid #6b7280;" if level in STRUCTURING_TASK_LEVELS else ""
         return [
             f"background-color: {color}; color: #111827; font-size: 13px; {separator} {text_style}"
             for _ in row
@@ -368,12 +374,7 @@ def styled_task_table(data: pd.DataFrame, visible_columns: list[str] | None = No
 
 
 def task_level_legend() -> None:
-    labels = {
-        1: "Niveau 1",
-        2: "Niveau 2",
-        3: "Niveau 3",
-        4: "Niveau 4",
-    }
+    labels = {level: f"Niveau {level}" for level in range(1, MAX_TASK_LEVEL + 1)}
     legend = "".join(
         f"<span style='display:inline-flex;align-items:center;gap:6px;margin-right:14px;"
         f"background:{LEVEL_COLORS[level]};border:1px solid #d8dee8;border-radius:4px;"
@@ -848,26 +849,29 @@ def task_editor(
         lambda value: json.dumps([""] + list(budget_labels_by_project.get(int(value), {}).keys()), ensure_ascii=False)
     )
     visible_grid_data = visible_task_rows(grid_data, max_level, collapsed_task_ids)
+    aggrid_level_styles = {
+        str(level): {
+            "backgroundColor": style["background_color"],
+            "fontWeight": str(style["font_weight"]),
+            "fontStyle": style["font_style"],
+            "fontSize": f"{style['font_size']}px",
+            "textDecoration": style["text_decoration"],
+            **(
+                {"borderBottom": "1px solid #6b7280"}
+                if level in STRUCTURING_TASK_LEVELS else {}
+            ),
+        }
+        for level, style in TASK_LEVEL_STYLES.items()
+    }
     row_style = JsCode(
         """
         function(params) {
             const level = Number(params.data.Niveau || 0);
             const base = {fontSize: '13px', color: '#111827'};
-            if (level === 1) {
-                return {...base, backgroundColor: '#f3f4f6', fontWeight: '700', textDecoration: 'underline', borderBottom: '1px solid #6b7280'};
-            }
-            if (level === 2) {
-                return {...base, backgroundColor: '#fff8d6', borderBottom: '1px solid #6b7280'};
-            }
-            if (level === 3) {
-                return {...base, backgroundColor: '#e0f2fe', fontStyle: 'italic'};
-            }
-            if (level === 4) {
-                return {...base, backgroundColor: '#ffffff', fontStyle: 'italic', fontSize: '12px'};
-            }
-            return base;
+            const styles = __TASK_LEVEL_STYLES__;
+            return {...base, ...(styles[String(level)] || {})};
         }
-        """
+        """.replace("__TASK_LEVEL_STYLES__", json.dumps(aggrid_level_styles))
     )
     tree_toggle_renderer = JsCode(
         """
@@ -978,7 +982,7 @@ def task_editor(
             "editable": True,
             "width": 95,
             "cellEditor": "agSelectCellEditor",
-            "cellEditorParams": {"values": [1, 2, 3, 4]},
+            "cellEditorParams": {"values": list(range(1, MAX_TASK_LEVEL + 1))},
         },
         {"field": "Enfants", "editable": False, "width": 95, "type": "numericColumn"},
         {"field": "Mode calcul", "editable": False, "width": 125},
@@ -2384,16 +2388,16 @@ def show_tasks() -> None:
             key=f"tasks_color_{project_key}",
         )
 
-    level_labels = ["Niveau 1", "Niveau 2", "Niveau 3", "Niveau 4"]
+    level_labels = [f"Niveau {level}" for level in range(1, MAX_TASK_LEVEL + 1)]
     level_key = "tasks_visible_depth"
     if st.session_state.get(level_key) not in level_labels:
-        st.session_state[level_key] = "Niveau 4"
+        st.session_state[level_key] = f"Niveau {MAX_TASK_LEVEL}"
     selected_depth_label = st.segmented_control(
         "Profondeur affichée",
         level_labels,
         key=level_key,
         selection_mode="single",
-    ) or "Niveau 4"
+    ) or f"Niveau {MAX_TASK_LEVEL}"
     max_level = level_labels.index(selected_depth_label) + 1
     collapse_key = "tasks_collapsed_task_ids"
     valid_task_ids = {int(value) for value in task_data.get("ID", pd.Series(dtype=int)).dropna().tolist()}
@@ -2463,7 +2467,7 @@ def show_tasks() -> None:
         with st.form("task_form"):
             title = st.text_input("Titre")
             c1, c2, c3, c4 = st.columns(4)
-            level = c1.selectbox("Niveau", [1, 2, 3, 4])
+            level = c1.selectbox("Niveau", list(range(1, MAX_TASK_LEVEL + 1)))
             status = c2.selectbox("Statut", ["Non commencé", "En cours", "En attente", "Bloqué", "Terminé"], index=0)
             priority = c3.selectbox("Priorité", ["Basse", "Normale", "Haute", "Critique"], index=1)
             progress = c4.slider("Avancement", 0, 100, 0)

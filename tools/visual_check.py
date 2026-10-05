@@ -281,7 +281,7 @@ def inspect_page(page, spec: dict[str, Any], report: VisualReport) -> None:
             page.keyboard.press("Escape")
 
     if slug == "tasks":
-        for level in range(1, 5):
+        for level in range(1, 7):
             control = page.get_by_text(f"Niveau {level}", exact=True).first
             report.check(
                 f"tasks: level {level} control visible",

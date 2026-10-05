@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .task_hierarchy import MAX_TASK_LEVEL
+
 
 class Page(BaseModel):
     items: list[dict[str, Any]]
@@ -44,7 +46,7 @@ class ProjectPatch(BaseModel):
 class TaskCreate(BaseModel):
     budget_id: int | None = None
     title: str = Field(min_length=1, max_length=220)
-    level: int = Field(default=1, ge=1, le=4)
+    level: int = Field(default=1, ge=1, le=MAX_TASK_LEVEL)
     parent_id: int | None = None
     status: str = "Non commencé"
     priority: str = "Normale"
@@ -63,7 +65,7 @@ class TaskPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
     title: str | None = None
     budget_id: int | None = None
-    level: int | None = Field(default=None, ge=1, le=4)
+    level: int | None = Field(default=None, ge=1, le=MAX_TASK_LEVEL)
     parent_id: int | None = None
     status: str | None = None
     priority: str | None = None

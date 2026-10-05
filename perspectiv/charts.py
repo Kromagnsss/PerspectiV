@@ -8,6 +8,8 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
+from .task_hierarchy import STRUCTURING_TASK_LEVELS, task_level_style
+
 
 STATUS_COLORS = {
     "Non commencé": "#94a3b8",
@@ -53,34 +55,16 @@ def add_today_band(fig: go.Figure, start_value: object, end_value: object) -> No
 
 def task_level_label(label: object, level: object) -> str:
     escaped = html.escape(str(label or ""))
-    try:
-        level_num = int(level)
-    except (TypeError, ValueError):
-        level_num = 0
-    if level_num == 1:
-        return f"<b><u>{escaped}</u></b>"
-    if level_num == 2:
-        return escaped
-    if level_num == 3:
-        return f"<i>{escaped}</i>"
-    if level_num == 4:
-        return f"<span style='font-size:12px'><i>{escaped}</i></span>"
-    return escaped
+    style = task_level_style(level)
+    return (
+        f"<span style='font-size:{style['font_size']}px;"
+        f"font-weight:{style['font_weight']};font-style:{style['font_style']};"
+        f"text-decoration:{style['text_decoration']}'>{escaped}</span>"
+    )
 
 
 def task_level_annotation(label: object, level: object) -> str:
-    escaped = html.escape(str(label or ""))
-    try:
-        level_num = int(level)
-    except (TypeError, ValueError):
-        level_num = 0
-    if level_num == 1:
-        return f"<b><u>{escaped}</u></b>"
-    if level_num == 3:
-        return f"<i>{escaped}</i>"
-    if level_num == 4:
-        return f"<span style='font-size:12px'><i>{escaped}</i></span>"
-    return escaped
+    return task_level_label(label, level)
 
 
 def empty_figure(message: str) -> go.Figure:
@@ -261,6 +245,20 @@ def gantt_figure(tasks: pd.DataFrame, color_field: str = "Temps prévu", *, mult
         rangeslider=dict(visible=True, thickness=0.08),
         domain=[0.28, 1],
     )
+    for row in df.to_dict("records"):
+        style = task_level_style(row.get("Niveau"))
+        fig.add_shape(
+            type="rect",
+            xref="paper",
+            x0=0,
+            x1=1,
+            yref="y",
+            y0=row["Ligne Gantt"] - 0.5,
+            y1=row["Ligne Gantt"] + 0.5,
+            fillcolor=str(style["background_color"]),
+            line_width=0,
+            layer="below",
+        )
     add_today_band(fig, df["Début"].min(), df["Fin affichée"].max())
     for row in df.to_dict("records"):
         fig.add_annotation(
@@ -279,7 +277,7 @@ def gantt_figure(tasks: pd.DataFrame, color_field: str = "Temps prévu", *, mult
             level = int(row.get("Niveau") or 0)
         except (TypeError, ValueError):
             level = 0
-        if level in {1, 2}:
+        if level in STRUCTURING_TASK_LEVELS:
             fig.add_shape(
                 type="line",
                 xref="paper",

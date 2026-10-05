@@ -31,6 +31,7 @@ from .models import (
     UserGridPreference,
 )
 from .security import hash_password, verify_password
+from .task_hierarchy import MAX_TASK_LEVEL, normalize_task_level
 
 
 RISK_LEVELS = ["Low", "Medium", "High", "Extreme"]
@@ -263,7 +264,7 @@ def task_level_prefix(level: int | None) -> str:
         level_num = int(level or 1)
     except (TypeError, ValueError):
         level_num = 1
-    return "| " * max(min(level_num, 4) - 1, 0)
+    return "| " * (normalize_task_level(level_num) - 1)
 
 
 def get_project(session: Session, project_id: int) -> Project:
@@ -575,6 +576,9 @@ def create_task(
     starcost: bool,
     description: str,
 ) -> Task:
+    normalized_level = normalize_task_level(level)
+    if normalized_level != int(level):
+        raise ValueError(f"Le niveau de tâche doit être compris entre 1 et {MAX_TASK_LEVEL}.")
     if parent_id:
         parent = session.get(Task, parent_id)
         if not parent or parent.project_id != project_id:
@@ -589,7 +593,7 @@ def create_task(
         budget_id=budget_id,
         reference=next_task_reference(session, project_id),
         title=title.strip(),
-        level=level,
+        level=normalized_level,
         parent_id=parent_id,
         status=status,
         priority=priority,
@@ -879,7 +883,7 @@ def tasks_df(
 
 def visible_task_rows(
     data: pd.DataFrame,
-    max_level: int = 4,
+    max_level: int = MAX_TASK_LEVEL,
     collapsed_task_ids: Collection[int] | None = None,
 ) -> pd.DataFrame:
     """Return the visible hierarchy without discarding columns or reordering rows."""
@@ -897,7 +901,7 @@ def visible_task_rows(
 
     def is_visible(row: pd.Series) -> bool:
         try:
-            if int(row.get("Niveau") or 1) > max(1, min(int(max_level), 4)):
+            if int(row.get("Niveau") or 1) > max(1, min(int(max_level), MAX_TASK_LEVEL)):
                 return False
             task_id = int(row["ID"])
         except (TypeError, ValueError):
@@ -1473,7 +1477,7 @@ def _update_task_rows(session: Session, data: pd.DataFrame, project_id: int) -> 
         if budget_value and budget_id is None:
             raise ValueError(f"Le budget de {task.reference} doit appartenir au même projet.")
         task.title = _text(row.get("Titre")) or task.title
-        task.level = min(max(_int(row.get("Niveau")), 1), 4)
+        task.level = normalize_task_level(row.get("Niveau"))
         task.parent_id = parent_id
         task.budget_id = budget_id
         task.starcost = _bool(row.get("STARCOST"))

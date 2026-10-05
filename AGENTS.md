@@ -34,3 +34,4 @@ Utilise cette nouvelle entrée pour traiter le prompt.
 - Pour tout module de gestion des risques, centraliser la cotation et les regles d'acceptation dans la couche metier, tracer chaque iteration et verification, et conserver des liens coherents vers les projets et leurs taches.
 - Toute vue hierarchique multi-projet doit synchroniser ses filtres et replis entre tableaux et graphiques, preserver les donnees masquees et interdire les relations entre projets.
 - Avant toute publication, synchroniser toutes les sources de version, verifier que la version embarquee correspond exactement au tag cible et refuser de creer une release depuis un commit incoherent.
+- Pour toute hierarchie de taches, appliquer la meme profondeur, les memes styles et la meme palette dans les grilles, Gantt, formulaires et API; distinguer nettement les niveaux structurants tout en eclaircissant progressivement les niveaux de detail.
