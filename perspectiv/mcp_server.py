@@ -133,6 +133,7 @@ def _server() -> MCPServer:
         version=__version__,
         instructions=(
             "Toujours rechercher les projets et tâches avant une mutation. "
+            "Les tâches utilisent six niveaux hiérarchiques, numérotés de 1 à 6 inclus. "
             "Ne pointer que sur une tâche directe. Prévisualiser toute suppression puis demander une confirmation explicite."
         ),
         **kwargs,
@@ -344,7 +345,7 @@ def save_planning_week(payload: WeeklyEntries) -> dict[str, Any]:
 
 @mcp.tool(annotations=WRITE)
 def create_project_task(project_id: int, payload: TaskCreate) -> dict[str, Any]:
-    """Crée une tâche dans un projet après identification certaine du projet."""
+    """Crée une tâche de niveau 1 à 6 dans un projet préalablement identifié."""
     principal = _principal()
     require_manager(principal)
     require_scope(principal, "projects:write")
@@ -352,12 +353,12 @@ def create_project_task(project_id: int, payload: TaskCreate) -> dict[str, Any]:
         task = create_task(session, project_id=project_id, **payload.model_dump())
         session.flush()
         record_audit(session, actor_user_id=principal.user_id, source="mcp", action="create", entity_type="task", entity_id=task.id, after=task)
-        return {"id": task.id, "reference": task.reference, "title": task.title}
+        return {"id": task.id, "reference": task.reference, "title": task.title, "level": task.level}
 
 
 @mcp.tool(annotations=WRITE)
 def update_task(task_id: int, payload: TaskPatch) -> dict[str, Any]:
-    """Met à jour les champs fournis d'une tâche existante."""
+    """Met à jour les champs fournis d'une tâche, dont son niveau hiérarchique de 1 à 6."""
     principal = _principal()
     require_manager(principal)
     require_scope(principal, "projects:write")
@@ -374,7 +375,14 @@ def update_task(task_id: int, payload: TaskPatch) -> dict[str, Any]:
         validate_task_tree(session, task.project_id)
         recompute_actuals(session)
         record_audit(session, actor_user_id=principal.user_id, source="mcp", action="update", entity_type="task", entity_id=task.id, before=before, after=task)
-        return {"id": task.id, "reference": task.reference, "title": task.title, "status": task.status, "progress": task.progress}
+        return {
+            "id": task.id,
+            "reference": task.reference,
+            "title": task.title,
+            "level": task.level,
+            "status": task.status,
+            "progress": task.progress,
+        }
 
 
 @mcp.tool(annotations=WRITE)

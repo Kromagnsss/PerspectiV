@@ -21,18 +21,18 @@ def load_release_checker():
 
 
 def test_package_exposes_canonical_version() -> None:
-    assert __version__ == "0.3.7"
+    assert __version__ == "0.3.8"
 
 
 def test_release_checker_accepts_current_tag() -> None:
     checker = load_release_checker()
-    assert checker.validate_release_version("v0.3.7", ROOT) == "0.3.7"
+    assert checker.validate_release_version("v0.3.8", ROOT) == "0.3.8"
 
 
 def test_release_checker_rejects_mismatched_tag() -> None:
     checker = load_release_checker()
     with pytest.raises(ValueError, match="Publication incoherente"):
-        checker.validate_release_version("v0.3.6", ROOT)
+        checker.validate_release_version("v0.3.7", ROOT)
 
 
 def test_release_workflow_checks_version_before_building_archive() -> None:

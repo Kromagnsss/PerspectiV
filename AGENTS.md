@@ -35,3 +35,4 @@ Utilise cette nouvelle entrée pour traiter le prompt.
 - Toute vue hierarchique multi-projet doit synchroniser ses filtres et replis entre tableaux et graphiques, preserver les donnees masquees et interdire les relations entre projets.
 - Avant toute publication, synchroniser toutes les sources de version, verifier que la version embarquee correspond exactement au tag cible et refuser de creer une release depuis un commit incoherent.
 - Pour toute hierarchie de taches, appliquer la meme profondeur, les memes styles et la meme palette dans les grilles, Gantt, formulaires et API; distinguer nettement les niveaux structurants tout en eclaircissant progressivement les niveaux de detail.
+- Toute evolution d'un champ expose au connecteur ChatGPT doit etre verifiee dans le schema MCP effectivement publie et par un appel MCP de bout en bout, afin d'eviter qu'une validation ou un schema mis en cache conserve l'ancienne contrainte.

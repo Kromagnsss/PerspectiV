@@ -141,6 +141,8 @@ set -a; source /etc/perspectiv/perspectiv.env; set +a
 
 Creer un connecteur MCP dans ChatGPT avec l'URL `https://perspectiv.example.com/mcp`, le client OAuth public `perspectiv-mcp` et l'URL de retour affichee par ChatGPT. Si cette URL differe de la valeur par defaut, relancer `tools/configure_keycloak.py --chatgpt-redirect-uri ...`. Les outils MCP sont des commandes metier bornees : aucun SQL libre n'est disponible, les mutations sont auditees et toute suppression exige une previsualisation suivie d'un jeton de confirmation temporaire.
 
+Apres toute mise a jour qui modifie les outils, leurs descriptions ou leurs schemas, ouvrir la connexion PerspectiV dans les reglages des plugins ChatGPT, choisir **Refresh**, verifier les metadonnees annoncees, puis demarrer une nouvelle conversation. Une conversation deja ouverte peut conserver l'ancien schema MCP.
+
 Les scopes disponibles sont `read`, `timesheet:write`, `planning:write`, `projects:write`, `delete` et `admin`. Les membres ne peuvent modifier que leurs propres pointages et planifications; les managers administrent les projets; les administrateurs gerent aussi les utilisateurs et l'audit.
 
 ## Fonctionnalites Access

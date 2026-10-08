@@ -46,7 +46,12 @@ class ProjectPatch(BaseModel):
 class TaskCreate(BaseModel):
     budget_id: int | None = None
     title: str = Field(min_length=1, max_length=220)
-    level: int = Field(default=1, ge=1, le=MAX_TASK_LEVEL)
+    level: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_TASK_LEVEL,
+        description="Niveau hiérarchique entier de 1 (projet ou phase) à 6 (détail le plus fin).",
+    )
     parent_id: int | None = None
     status: str = "Non commencé"
     priority: str = "Normale"
@@ -65,7 +70,12 @@ class TaskPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
     title: str | None = None
     budget_id: int | None = None
-    level: int | None = Field(default=None, ge=1, le=MAX_TASK_LEVEL)
+    level: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_TASK_LEVEL,
+        description="Nouveau niveau hiérarchique entier, compris entre 1 et 6.",
+    )
     parent_id: int | None = None
     status: str | None = None
     priority: str | None = None
