@@ -36,3 +36,4 @@ Utilise cette nouvelle entrée pour traiter le prompt.
 - Avant toute publication, synchroniser toutes les sources de version, verifier que la version embarquee correspond exactement au tag cible et refuser de creer une release depuis un commit incoherent.
 - Pour toute hierarchie de taches, appliquer la meme profondeur, les memes styles et la meme palette dans les grilles, Gantt, formulaires et API; distinguer nettement les niveaux structurants tout en eclaircissant progressivement les niveaux de detail.
 - Toute evolution d'un champ expose au connecteur ChatGPT doit etre verifiee dans le schema MCP effectivement publie et par un appel MCP de bout en bout, afin d'eviter qu'une validation ou un schema mis en cache conserve l'ancienne contrainte.
+- Tout service qui alimente une grille ou une vue a partir d'un DataFrame doit conserver un schema de colonnes stable lorsque le resultat est vide, notamment pour les projets nouvellement crees sans enregistrement enfant.

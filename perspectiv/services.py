@@ -75,6 +75,38 @@ RISK_LIFECYCLE_PHASES = [
     "Démantèlement",
 ]
 
+TASK_DATA_COLUMNS = [
+    "ID",
+    "Projet ID",
+    "Projet Code",
+    "Projet",
+    "Référence",
+    "Titre",
+    "Libellé",
+    "Niveau",
+    "Enfants",
+    "Mode calcul",
+    "Parent",
+    "Parent ID",
+    "Budget",
+    "STARCOST",
+    "Statut",
+    "Priorité",
+    "Début",
+    "Fin estimée",
+    "Date de clôture",
+    "Temps prévu",
+    "Temps passé",
+    "Temps planifié",
+    "Coût prévu",
+    "Coût temps réel",
+    "Dépense directe",
+    "Coût réel total",
+    "Avancement",
+    "Ressources",
+    "Description",
+]
+
 
 def risk_level(likelihood: str, consequence: int) -> str:
     likelihood = str(likelihood).strip().upper()
@@ -760,7 +792,7 @@ def tasks_df(
     )
     selected_project_ids = _project_ids(project_id, project_ids)
     if project_ids is not None and not selected_project_ids:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=TASK_DATA_COLUMNS)
     if selected_project_ids:
         stmt = stmt.where(Task.project_id.in_(selected_project_ids))
     records = session.execute(stmt).all()
@@ -878,7 +910,7 @@ def tasks_df(
                 "Description": task.description or "",
             }
         )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=TASK_DATA_COLUMNS)
 
 
 def visible_task_rows(

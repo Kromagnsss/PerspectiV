@@ -57,6 +57,24 @@ def test_six_levels_are_valid_and_have_progressive_indentation() -> None:
     assert task_level_prefix(6) == "| | | | | "
 
 
+def test_new_project_without_tasks_keeps_task_dataframe_schema() -> None:
+    init_db()
+    session = SessionLocal()
+    try:
+        project = Project(code="TEST-EMPTY-TASKS", name="Projet sans tâche")
+        session.add(project)
+        session.flush()
+
+        data = tasks_df(session, project_id=project.id)
+
+        assert data.empty
+        assert {"ID", "Projet ID", "Référence", "Niveau", "Parent ID"} <= set(data.columns)
+        assert data.loc[data["Projet ID"] == project.id].empty
+    finally:
+        session.rollback()
+        session.close()
+
+
 def test_gantt_has_bottom_separators_for_levels_one_and_two() -> None:
     tasks = pd.DataFrame([
         {
